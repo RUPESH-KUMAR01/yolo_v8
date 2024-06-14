@@ -208,7 +208,7 @@ class Instances:
         This class does not perform input validation, and it assumes the inputs are well-formed.
     """
 
-    def __init__(self, bboxes, segments=None, keypoints=None, bbox_format="xywh", normalized=True) -> None:
+    def __init__(self, bboxes,bbox_format="xywh", normalized=True) -> None:
         """
         Args:
             bboxes (ndarray): bboxes with shape [N, 4].
@@ -216,9 +216,7 @@ class Instances:
             keypoints (ndarray): keypoints(x, y, visible) with shape [N, 17, 3].
         """
         self._bboxes = Bboxes(bboxes=bboxes, format=bbox_format)
-        self.keypoints = keypoints
         self.normalized = normalized
-        self.segments = segments
 
     def convert_bbox(self, format):
         """Convert bounding box format."""
@@ -234,22 +232,12 @@ class Instances:
         self._bboxes.mul(scale=(scale_w, scale_h, scale_w, scale_h))
         if bbox_only:
             return
-        self.segments[..., 0] *= scale_w
-        self.segments[..., 1] *= scale_h
-        if self.keypoints is not None:
-            self.keypoints[..., 0] *= scale_w
-            self.keypoints[..., 1] *= scale_h
 
     def denormalize(self, w, h):
         """Denormalizes boxes, segments, and keypoints from normalized coordinates."""
         if not self.normalized:
             return
         self._bboxes.mul(scale=(w, h, w, h))
-        self.segments[..., 0] *= w
-        self.segments[..., 1] *= h
-        if self.keypoints is not None:
-            self.keypoints[..., 0] *= w
-            self.keypoints[..., 1] *= h
         self.normalized = False
 
     def normalize(self, w, h):
@@ -257,22 +245,12 @@ class Instances:
         if self.normalized:
             return
         self._bboxes.mul(scale=(1 / w, 1 / h, 1 / w, 1 / h))
-        self.segments[..., 0] /= w
-        self.segments[..., 1] /= h
-        if self.keypoints is not None:
-            self.keypoints[..., 0] /= w
-            self.keypoints[..., 1] /= h
         self.normalized = True
 
     def add_padding(self, padw, padh):
         """Handle rect and mosaic situation."""
         assert not self.normalized, "you should add padding with absolute coordinates."
         self._bboxes.add(offset=(padw, padh, padw, padh))
-        self.segments[..., 0] += padw
-        self.segments[..., 1] += padh
-        if self.keypoints is not None:
-            self.keypoints[..., 0] += padw
-            self.keypoints[..., 1] += padh
 
     def __getitem__(self, index) -> "Instances":
         """
@@ -290,14 +268,10 @@ class Instances:
             When using boolean indexing, make sure to provide a boolean array with the same
             length as the number of instances.
         """
-        segments = self.segments[index] if len(self.segments) else self.segments
-        keypoints = self.keypoints[index] if self.keypoints is not None else None
         bboxes = self.bboxes[index]
         bbox_format = self._bboxes.format
         return Instances(
             bboxes=bboxes,
-            segments=segments,
-            keypoints=keypoints,
             bbox_format=bbox_format,
             normalized=self.normalized,
         )
@@ -311,9 +285,6 @@ class Instances:
             self.bboxes[:, 3] = h - y1
         else:
             self.bboxes[:, 1] = h - self.bboxes[:, 1]
-        self.segments[..., 1] = h - self.segments[..., 1]
-        if self.keypoints is not None:
-            self.keypoints[..., 1] = h - self.keypoints[..., 1]
 
     def fliplr(self, w):
         """Reverses the order of the bounding boxes and segments horizontally."""
@@ -324,9 +295,6 @@ class Instances:
             self.bboxes[:, 2] = w - x1
         else:
             self.bboxes[:, 0] = w - self.bboxes[:, 0]
-        self.segments[..., 0] = w - self.segments[..., 0]
-        if self.keypoints is not None:
-            self.keypoints[..., 0] = w - self.keypoints[..., 0]
 
     def clip(self, w, h):
         """Clips bounding boxes, segments, and keypoints values to stay within image boundaries."""
@@ -336,30 +304,17 @@ class Instances:
         self.bboxes[:, [1, 3]] = self.bboxes[:, [1, 3]].clip(0, h)
         if ori_format != "xyxy":
             self.convert_bbox(format=ori_format)
-        self.segments[..., 0] = self.segments[..., 0].clip(0, w)
-        self.segments[..., 1] = self.segments[..., 1].clip(0, h)
-        if self.keypoints is not None:
-            self.keypoints[..., 0] = self.keypoints[..., 0].clip(0, w)
-            self.keypoints[..., 1] = self.keypoints[..., 1].clip(0, h)
 
     def remove_zero_area_boxes(self):
         """Remove zero-area boxes, i.e. after clipping some boxes may have zero width or height."""
         good = self.bbox_areas > 0
         if not all(good):
             self._bboxes = self._bboxes[good]
-            if len(self.segments):
-                self.segments = self.segments[good]
-            if self.keypoints is not None:
-                self.keypoints = self.keypoints[good]
         return good
 
     def update(self, bboxes, segments=None, keypoints=None):
         """Updates instance variables."""
         self._bboxes = Bboxes(bboxes, format=self._bboxes.format)
-        if segments is not None:
-            self.segments = segments
-        if keypoints is not None:
-            self.keypoints = keypoints
 
     def __len__(self):
         """Return the length of the instance list."""
@@ -391,14 +346,11 @@ class Instances:
         if len(instances_list) == 1:
             return instances_list[0]
 
-        use_keypoint = instances_list[0].keypoints is not None
         bbox_format = instances_list[0]._bboxes.format
         normalized = instances_list[0].normalized
 
         cat_boxes = np.concatenate([ins.bboxes for ins in instances_list], axis=axis)
-        cat_segments = np.concatenate([b.segments for b in instances_list], axis=axis)
-        cat_keypoints = np.concatenate([b.keypoints for b in instances_list], axis=axis) if use_keypoint else None
-        return cls(cat_boxes, cat_segments, cat_keypoints, bbox_format, normalized)
+        return cls(cat_boxes,bbox_format, normalized)
 
     @property
     def bboxes(self):

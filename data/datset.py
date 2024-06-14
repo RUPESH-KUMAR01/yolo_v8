@@ -7,9 +7,7 @@ import math
 from multiprocessing.pool import ThreadPool
 import os
 from pathlib import Path
-from tarfile import is_tarfile
-import time
-import zipfile
+from typing import Optional
 import cv2
 import numpy as np
 import torch
@@ -20,7 +18,7 @@ from data.augment import Compose, Format, LetterBox, v8_transforms
 from data.instance import Instances
 from data.ops import resample_segments, segments2boxes
 from utils import LOGGER, NUM_THREADS, TQDM
-from utils.yaml_util import yaml_load, yaml_save
+from utils.yaml_util import yaml_load
 
 from cfg import DATASETS_DIR, DEFAULT_CFG, LOCAL_RANK, ROOT
 
@@ -108,11 +106,13 @@ class YOLODataset(Dataset):
         batch_size=16,
         stride=32,
         pad=0.5,
+        single_cls=False,
         classes=None,
         fraction=1.0,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
+        self.single_cls=False,
         self.data = data
         self.img_path = img_path
         self.imgsz = imgsz
@@ -121,6 +121,7 @@ class YOLODataset(Dataset):
         self.fraction = fraction
         self.im_files = self.get_img_files(self.img_path)
         self.labels = self.get_labels()
+        # self.update_labels(include_class=classes)  # single_cls and include_class
         self.ni = len(self.labels)  # number of images
         self.batch_size = batch_size
         self.stride = stride
@@ -129,15 +130,25 @@ class YOLODataset(Dataset):
         self.buffer = []  # buffer size = batch size
         self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
         self.cache=None
-        self.use_segments = task == "segment"
-        self.use_keypoints = task == "pose"
-        self.use_obb = task == "obb"
         # Cache images (options are cache = True, False, None, "ram", "disk")
         self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
         self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
 
         # Transforms
         self.transforms = self.build_transforms(hyp=hyp)
+    def update_labels(self, include_class: Optional[list]):
+        """Update labels to include only these classes (optional)."""
+        include_class_array = np.array(include_class).reshape(1, -1)
+        for i in range(len(self.labels)):
+            if include_class is not None:
+                cls = self.labels[i]["cls"]
+                bboxes = self.labels[i]["bboxes"]
+                j = (cls == include_class_array).any(1)
+                self.labels[i]["cls"] = cls[j]
+                self.labels[i]["bboxes"] = bboxes[j]
+            if self.single_cls:
+                self.labels[i]["cls"][:, 0] = 0
+
     def get_img_files(self,img_path):
         """Read image files."""
         try:
@@ -174,10 +185,10 @@ class YOLODataset(Dataset):
         h.update("".join(paths).encode())  # hash paths
         return h.hexdigest()  # return hash
     def load_dataset_cache_file(self,path):
-        """Load an Ultralytics *.cache dictionary from path."""
+        """Load an   *.cache dictionary from path."""
         import gc
 
-        gc.disable()  # reduce pickle load time https://github.com/ultralytics/ultralytics/pull/1585
+        gc.disable()  # reduce pickle load time https://github.com/ / /pull/1585
         cache = np.load(str(path), allow_pickle=True).item()  # load dict
         gc.enable()
         return cache
@@ -195,7 +206,7 @@ class YOLODataset(Dataset):
 
     def verify_image_label(self,args):
         """Verify one image-label pair."""
-        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
+        im_file, lb_file, prefix, num_cls= args
         # Number (missing, found, empty, corrupt), message, segments, keypoints
         nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
         try:
@@ -218,19 +229,11 @@ class YOLODataset(Dataset):
                 nf = 1  # label found
                 with open(lb_file) as f:
                     lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                    if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
-                        classes = np.array([x[0] for x in lb], dtype=np.float32)
-                        segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
-                        lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
                     lb = np.array(lb, dtype=np.float32)
                 nl = len(lb)
                 if nl:
-                    if keypoint:
-                        assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
-                        points = lb[:, 5:].reshape(-1, ndim)[:, :2]
-                    else:
-                        assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
-                        points = lb[:, 1:]
+                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                    points = lb[:, 1:]
                     assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
                     assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 
@@ -248,15 +251,10 @@ class YOLODataset(Dataset):
                         msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
                 else:
                     ne = 1  # label empty
-                    lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+                    lb = np.zeros((0,5), dtype=np.float32)
             else:
                 nm = 1  # label missing
-                lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
-            if keypoint:
-                keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
-                if ndim == 2:
-                    kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
-                    keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
+                lb = np.zeros((0,5), dtype=np.float32)
             lb = lb[:, :5]
             return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
         except Exception as e:
@@ -265,7 +263,7 @@ class YOLODataset(Dataset):
             return [None, None, None, None, None, nm, nf, ne, nc, msg]
 
     def save_dataset_cache_file(prefix, path, x, version):
-        """Save an Ultralytics dataset *.cache dictionary x to path."""
+        """Save an   dataset *.cache dictionary x to path."""
         x["version"] = version  # add cache version
         if os.access(str(path.parent), os.W_OK):
             if path.exists():
@@ -290,12 +288,6 @@ class YOLODataset(Dataset):
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
         total = len(self.im_files)
-        nkpt, ndim = self.data.get("kpt_shape", (0, 0))
-        if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
-            raise ValueError(
-                "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
-                "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
-            )
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
                 func=self.verify_image_label,
@@ -303,10 +295,7 @@ class YOLODataset(Dataset):
                     self.im_files,
                     self.label_files,
                     repeat(self.prefix),
-                    repeat(self.use_keypoints),
                     repeat(len(self.data["names"])),
-                    repeat(nkpt),
-                    repeat(ndim),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
@@ -322,8 +311,6 @@ class YOLODataset(Dataset):
                             "shape": shape,
                             "cls": lb[:, 0:1],  # n, 1
                             "bboxes": lb[:, 1:],  # n, 4
-                            "segments": segments,
-                            "keypoints": keypoint,
                             "normalized": True,
                             "bbox_format": "xywh",
                         }
@@ -387,7 +374,7 @@ class YOLODataset(Dataset):
         return self.transforms(self.get_image_and_label(index))
     def get_image_and_label(self, index):
         """Get and return label information from the dataset."""
-        label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
+        label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ / /pull/1948
         label.pop("shape", None)  # shape is for rect, remove it
         label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
         label["ratio_pad"] = (
@@ -406,20 +393,10 @@ class YOLODataset(Dataset):
             Can also support classification and semantic segmentation by adding or removing dict keys there.
         """
         bboxes = label.pop("bboxes")
-        segments = label.pop("segments", [])
-        keypoints = label.pop("keypoints", None)
         bbox_format = label.pop("bbox_format")
         normalized = label.pop("normalized")
 
-        # NOTE: do NOT resample oriented boxes
-        segment_resamples = 100 if self.use_obb else 1000
-        if len(segments) > 0:
-            # list[np.array(1000, 2)] * num_samples
-            # (N, 1000, 2)
-            segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
-        else:
-            segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
-        label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+        label["instances"] = Instances(bboxes,bbox_format=bbox_format, normalized=normalized)
         return label
     def load_image(self, i, rect_mode=True):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
@@ -470,7 +447,7 @@ class YOLODataset(Dataset):
             value = values[i]
             if k == "img":
                 value = torch.stack(value, 0)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "bboxes", "cls"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
@@ -492,9 +469,6 @@ class YOLODataset(Dataset):
             Format(
                 bbox_format="xywh",
                 normalize=True,
-                return_mask=self.use_segments,
-                return_keypoint=self.use_keypoints,
-                return_obb=self.use_obb,
                 batch_idx=True,
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,

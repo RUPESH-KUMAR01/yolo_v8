@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+from contextlib import contextmanager
 from importlib import metadata
 import importlib
 import math
@@ -13,7 +14,8 @@ import numpy as np
 from pkg_resources import parse_version
 import torch
 from PIL import Image
-
+import torch.distributed as dist
+from data.metrics import bbox_ioa
 from utils import LOGGER
 def check_version(
     current: str = "0.0.0",
@@ -100,12 +102,23 @@ TORCHVISION_VERSION = importlib.metadata.version("torchvision")  # faster than i
 TORCHVISION_0_10 = check_version(TORCHVISION_VERSION, "0.10.0")
 TORCHVISION_0_11 = check_version(TORCHVISION_VERSION, "0.11.0")
 TORCHVISION_0_13 = check_version(TORCHVISION_VERSION, "0.13.0")
-
+# Version checks (all default to version>=min_version)
+TORCH_1_9 = check_version(torch.__version__, "1.9.0")
+TORCH_1_13 = check_version(torch.__version__, "1.13.0")
+TORCH_2_0 = check_version(torch.__version__, "2.0.0")
+@contextmanager
+def torch_distributed_zero_first(local_rank: int):
+    """Decorator to make all processes in distributed training wait for each local_master to do something."""
+    initialized = torch.distributed.is_available() and torch.distributed.is_initialized()
+    if initialized and local_rank not in {-1, 0}:
+        dist.barrier(device_ids=[local_rank])
+    yield
+    if initialized and local_rank == 0:
+        dist.barrier(device_ids=[0])
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
 DEFAULT_CROP_FRACTION = 1.0
-
 
 # TODO: we might need a BaseTransform to make all these augments be compatible with both classification and semantic
 class BaseTransform:
@@ -663,15 +676,7 @@ class RandomPerspective:
 
         bboxes = self.apply_bboxes(instances.bboxes, M)
 
-        segments = instances.segments
-        keypoints = instances.keypoints
-        # Update bboxes if there are segments.
-        if len(segments):
-            bboxes, segments = self.apply_segments(segments, M)
-
-        if keypoints is not None:
-            keypoints = self.apply_keypoints(keypoints, M)
-        new_instances = Instances(bboxes, segments, keypoints, bbox_format="xyxy", normalized=False)
+        new_instances = Instances(bboxes,bbox_format="xyxy", normalized=False)
         # Clip
         new_instances.clip(*self.size)
 
@@ -679,7 +684,7 @@ class RandomPerspective:
         instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
         # Make the bboxes have the same scale with new_bboxes
         i = self.box_candidates(
-            box1=instances.bboxes.T, box2=new_instances.bboxes.T, area_thr=0.01 if len(segments) else 0.10
+            box1=instances.bboxes.T, box2=new_instances.bboxes.T, area_thr=0.10
         )
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
@@ -801,9 +806,6 @@ class RandomFlip:
         if self.direction == "horizontal" and random.random() < self.p:
             img = np.fliplr(img)
             instances.fliplr(w)
-            # For keypoints
-            if self.flip_idx is not None and instances.keypoints is not None:
-                instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
         labels["img"] = np.ascontiguousarray(img)
         labels["instances"] = instances
         return labels
@@ -942,37 +944,7 @@ class CopyPaste:
         labels["cls"] = cls
         labels["instances"] = instances
         return labels
-def bbox_ioa(box1, box2, iou=False, eps=1e-7):
-    """
-    Calculate the intersection over box2 area given box1 and box2. Boxes are in x1y1x2y2 format.
 
-    Args:
-        box1 (np.ndarray): A numpy array of shape (n, 4) representing n bounding boxes.
-        box2 (np.ndarray): A numpy array of shape (m, 4) representing m bounding boxes.
-        iou (bool): Calculate the standard IoU if True else return inter_area/box2_area.
-        eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
-
-    Returns:
-        (np.ndarray): A numpy array of shape (n, m) representing the intersection over box2 area.
-    """
-
-    # Get the coordinates of bounding boxes
-    b1_x1, b1_y1, b1_x2, b1_y2 = box1.T
-    b2_x1, b2_y1, b2_x2, b2_y2 = box2.T
-
-    # Intersection area
-    inter_area = (np.minimum(b1_x2[:, None], b2_x2) - np.maximum(b1_x1[:, None], b2_x1)).clip(0) * (
-        np.minimum(b1_y2[:, None], b2_y2) - np.maximum(b1_y1[:, None], b2_y1)
-    ).clip(0)
-
-    # Box2 area
-    area = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)
-    if iou:
-        box1_area = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)
-        area = area + box1_area[:, None] - inter_area
-
-    # Intersection over box2 area
-    return inter_area / (area + eps)
 
 class Albumentations:
     """
@@ -1136,28 +1108,28 @@ class Format:
         instances.denormalize(w, h)
         nl = len(instances)
 
-        if self.return_mask:
-            if nl:
-                masks, instances, cls = self._format_segments(instances, cls, w, h)
-                masks = torch.from_numpy(masks)
-            else:
-                masks = torch.zeros(
-                    1 if self.mask_overlap else nl, img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio
-                )
-            labels["masks"] = masks
+        # if self.return_mask:
+        #     if nl:
+        #         masks, instances, cls = self._format_segments(instances, cls, w, h)
+        #         masks = torch.from_numpy(masks)
+        #     else:
+        #         masks = torch.zeros(
+        #             1 if self.mask_overlap else nl, img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio
+        #         )
+        #     labels["masks"] = masks
         labels["img"] = self._format_img(img)
         labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
-        if self.return_keypoint:
-            labels["keypoints"] = torch.from_numpy(instances.keypoints)
-            if self.normalize:
-                labels["keypoints"][..., 0] /= w
-                labels["keypoints"][..., 1] /= h
-        if self.return_obb:
-            labels["bboxes"] = (
-                xyxyxyxy2xywhr(torch.from_numpy(instances.segments)) if len(instances.segments) else torch.zeros((0, 5))
-            )
-        # NOTE: need to normalize obb in xywhr format for width-height consistency
+        # if self.return_keypoint:
+        #     labels["keypoints"] = torch.from_numpy(instances.keypoints)
+        #     if self.normalize:
+        #         labels["keypoints"][..., 0] /= w
+        #         labels["keypoints"][..., 1] /= h
+        # if self.return_obb:
+        #     labels["bboxes"] = (
+        #         xyxyxyxy2xywhr(torch.from_numpy(instances.segments)) if len(instances.segments) else torch.zeros((0, 5))
+        #     )
+        # # NOTE: need to normalize obb in xywhr format for width-height consistency
         if self.normalize:
             labels["bboxes"][:, [0, 2]] /= w
             labels["bboxes"][:, [1, 3]] /= h
@@ -1174,7 +1146,6 @@ class Format:
         img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr else img)
         img = torch.from_numpy(img)
         return img
-
 
 
 
@@ -1217,10 +1188,7 @@ class RandomLoadText:
             pos_labels = set(random.sample(pos_labels, k=self.max_samples))
 
         neg_samples = min(min(num_classes, self.max_samples) - len(pos_labels), random.randint(*self.neg_samples))
-        neg_labels = []
-        for i in range(num_classes):
-            if i not in pos_labels:
-                neg_labels.append(i)
+        neg_labels = [i for i in range(num_classes) if i not in pos_labels]
         neg_labels = random.sample(neg_labels, k=neg_samples)
 
         sampled_labels = pos_labels + neg_labels
@@ -1272,13 +1240,6 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         ]
     )
     flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
-    if dataset.use_keypoints:
-        kpt_shape = dataset.data.get("kpt_shape", None)
-        if len(flip_idx) == 0 and hyp.fliplr > 0.0:
-            hyp.fliplr = 0.0
-            LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
-        elif flip_idx and (len(flip_idx) != kpt_shape[0]):
-            raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
 
     return Compose(
         [
@@ -1406,19 +1367,19 @@ def classify_augmentations(
             if TORCHVISION_0_11:
                 secondary_tfl += [T.RandAugment(interpolation=interpolation)]
             else:
-                LOGGER.info('"auto_augment=randaugment" requires torchvision >= 0.11.0. Disabling it.')
+                LOGGER.warning('"auto_augment=randaugment" requires torchvision >= 0.11.0. Disabling it.')
 
         elif auto_augment == "augmix":
             if TORCHVISION_0_13:
                 secondary_tfl += [T.AugMix(interpolation=interpolation)]
             else:
-                LOGGER.info('"auto_augment=augmix" requires torchvision >= 0.13.0. Disabling it.')
+                LOGGER.warning('"auto_augment=augmix" requires torchvision >= 0.13.0. Disabling it.')
 
         elif auto_augment == "autoaugment":
             if TORCHVISION_0_10:
                 secondary_tfl += [T.AutoAugment(interpolation=interpolation)]
             else:
-                LOGGER.info('"auto_augment=autoaugment" requires torchvision >= 0.10.0. Disabling it.')
+                LOGGER.warning('"auto_augment=autoaugment" requires torchvision >= 0.10.0. Disabling it.')
 
         else:
             raise ValueError(
@@ -1540,4 +1501,3 @@ class ToTensor:
         im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0-255 to 0.0-1.0
         return im
-

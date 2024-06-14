@@ -9,7 +9,8 @@ TQDM_BAR_FORMAT = "{l_bar}{bar:10}{r_bar}" if VERBOSE else None  # tqdm bar form
 from psutil import WINDOWS
 from tqdm import tqdm as tqdm_original
 LOGGING_NAME="custom_modified"
-
+version="1.0.0"
+TESTS_RUNNING=False
 
 def set_logging(name="LOGGING_NAME", verbose=True):
     """Sets up logging for the given name with UTF-8 encoding support, ensuring compatibility across different
@@ -58,7 +59,37 @@ def set_logging(name="LOGGING_NAME", verbose=True):
 LOGGER = set_logging(LOGGING_NAME, verbose=VERBOSE)  # define globally (used in train.py, val.py, predict.py, etc.)
 for logger in "sentry_sdk", "urllib3.connectionpool":
     logging.getLogger(logger).setLevel(logging.CRITICAL + 1)
+class SimpleClass:
+    """Ultralytics SimpleClass is a base class providing helpful string representation, error reporting, and attribute
+    access methods for easier debugging and usage.
+    """
 
+    def __str__(self):
+        """Return a human-readable string representation of the object."""
+        attr = []
+        for a in dir(self):
+            v = getattr(self, a)
+            if not callable(v) and not a.startswith("_"):
+                if isinstance(v, SimpleClass):
+                    # Display only the module and class name for subclasses
+                    s = f"{a}: {v.__module__}.{v.__class__.__name__} object"
+                else:
+                    s = f"{a}: {repr(v)}"
+                attr.append(s)
+        return f"{self.__module__}.{self.__class__.__name__} object with attributes:\n\n" + "\n".join(attr)
+
+    def __repr__(self):
+        """Return a machine-readable string representation of the object."""
+        return self.__str__()
+
+    def __getattr__(self, attr):
+        """Custom attribute access error message with helpful information."""
+        name = self.__class__.__name__
+        raise AttributeError(f"'{name}' object has no attribute '{attr}'. See valid attributes below.\n{self.__doc__}")
+    
+
+
+    
 class IterableSimpleNamespace(SimpleNamespace):
     """Ultralytics IterableSimpleNamespace is an extension class of SimpleNamespace that adds iterable functionality and
     enables usage with dict() and for loops.
