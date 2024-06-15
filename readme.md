@@ -13,7 +13,6 @@ This repository is a customized version of the Ultralytics YOLOv8 code, tailored
 1. **Model Development:**
     - Implement a straightforward model development approach using the `Sequential` function. This will make it easier to read and change the structure of the model.
     
-2. **Callbacks and Evaluation Metrics:**
-    - Add callbacks and evaluation metrics to monitor and evaluate model performance effectively.
+
 
 
