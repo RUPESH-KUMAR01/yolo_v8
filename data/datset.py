@@ -187,92 +187,15 @@ class YOLODataset(Dataset):
     def load_dataset_cache_file(self,path):
         """Load an   *.cache dictionary from path."""
         import gc
-
+        print(path)
         gc.disable()  # reduce pickle load time https://github.com/ / /pull/1585
         cache = np.load(str(path), allow_pickle=True).item()  # load dict
         gc.enable()
         return cache
-    def exif_size(img: Image.Image):
-        """Returns exif-corrected PIL size."""
-        s = img.size  # (width, height)
-        if img.format == "JPEG":  # only support JPEG images
-            with contextlib.suppress(Exception):
-                exif = img.getexif()
-                if exif:
-                    rotation = exif.get(274, None)  # the EXIF key for the orientation tag is 274
-                    if rotation in {6, 8}:  # rotation 270 or 90
-                        s = s[1], s[0]
-        return s
 
-    def verify_image_label(self,args):
-        """Verify one image-label pair."""
-        im_file, lb_file, prefix, num_cls= args
-        # Number (missing, found, empty, corrupt), message, segments, keypoints
-        nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
-        try:
-            # Verify images
-            im = Image.open(im_file)
-            im.verify()  # PIL verify
-            shape = self.exif_size(im)  # image size
-            shape = (shape[1], shape[0])  # hw
-            assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-            assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}."
-            if im.format.lower() in {"jpg", "jpeg"}:
-                with open(im_file, "rb") as f:
-                    f.seek(-2, 2)
-                    if f.read() != b"\xff\xd9":  # corrupt JPEG
-                        ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                        msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
 
-            # Verify labels
-            if os.path.isfile(lb_file):
-                nf = 1  # label found
-                with open(lb_file) as f:
-                    lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                    lb = np.array(lb, dtype=np.float32)
-                nl = len(lb)
-                if nl:
-                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
-                    points = lb[:, 1:]
-                    assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
-                    assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 
-                    # All labels
-                    max_cls = lb[:, 0].max()  # max label count
-                    assert max_cls <= num_cls, (
-                        f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
-                        f"Possible class labels are 0-{num_cls - 1}"
-                    )
-                    _, i = np.unique(lb, axis=0, return_index=True)
-                    if len(i) < nl:  # duplicate row check
-                        lb = lb[i]  # remove duplicates
-                        if segments:
-                            segments = [segments[x] for x in i]
-                        msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
-                else:
-                    ne = 1  # label empty
-                    lb = np.zeros((0,5), dtype=np.float32)
-            else:
-                nm = 1  # label missing
-                lb = np.zeros((0,5), dtype=np.float32)
-            lb = lb[:, :5]
-            return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
-        except Exception as e:
-            nc = 1
-            msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
-            return [None, None, None, None, None, nm, nf, ne, nc, msg]
 
-    def save_dataset_cache_file(prefix, path, x, version):
-        """Save an   dataset *.cache dictionary x to path."""
-        x["version"] = version  # add cache version
-        if os.access(str(path.parent), os.W_OK):
-            if path.exists():
-                path.unlink()  # remove *.cache file if exists
-            np.save(str(path), x)  # save cache for next time
-            path.with_suffix(".cache.npy").rename(path)  # remove .npy suffix
-            LOGGER.info(f"{prefix}New cache created: {path}")
-        else:
-            LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
 
     def cache_labels(self, path=Path("./labels.cache")):
         """
@@ -290,7 +213,7 @@ class YOLODataset(Dataset):
         total = len(self.im_files)
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
-                func=self.verify_image_label,
+                func=verify_image_label,
                 iterable=zip(
                     self.im_files,
                     self.label_files,
@@ -312,6 +235,8 @@ class YOLODataset(Dataset):
                             "cls": lb[:, 0:1],  # n, 1
                             "bboxes": lb[:, 1:],  # n, 4
                             "normalized": True,
+                            "segments": segments,
+                            "keypoint":keypoint,
                             "bbox_format": "xywh",
                         }
                     )
@@ -327,7 +252,7 @@ class YOLODataset(Dataset):
         x["hash"] = self.get_hash(self.label_files + self.im_files)
         x["results"] = nf, nm, ne, nc, len(self.im_files)
         x["msgs"] = msgs  # warnings
-        self.save_dataset_cache_file(self.prefix, path, x, CACHE_VERSION)
+        save_dataset_cache_file(self.prefix, path, x, CACHE_VERSION)
         return x
     def get_labels(self):
         """Returns dictionary of labels for YOLO training."""
@@ -335,18 +260,17 @@ class YOLODataset(Dataset):
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = self.load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
-            assert cache["version"] == CACHE_VERSION  # matches current version
+            # assert cache["version"] == CACHE_VERSION  # matches current version
             assert cache["hash"] == self.get_hash(self.label_files + self.im_files)  # identical hash
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
-
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
         if exists and LOCAL_RANK in {-1, 0}:
             d = f"Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
             TQDM(None, desc=self.prefix + d, total=n, initial=n)  # display results
             if cache["msgs"]:
-                LOGGER.info("\n".join(cache["msgs"]))  # display warnings
+                LOGGER.info((cache["msgs"][0]))  # display warnings
 
         # Read cache
         [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
@@ -482,3 +406,83 @@ class YOLODataset(Dataset):
         hyp.copy_paste = 0.0  # keep the same behavior as previous v8 close-mosaic
         hyp.mixup = 0.0  # keep the same behavior as previous v8 close-mosaic
         self.transforms = self.build_transforms(hyp)
+
+def verify_image_label(args):
+    """Verify one image-label pair."""
+    im_file, lb_file, prefix, num_cls= args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
+    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    try:
+        # Verify images
+        im = Image.open(im_file)
+        im.verify()  # PIL verify
+        shape = exif_size(im)  # image size
+        shape = (shape[1], shape[0])  # hw
+        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}."
+        if im.format.lower() in {"jpg", "jpeg"}:
+            with open(im_file, "rb") as f:
+                f.seek(-2, 2)
+                if f.read() != b"\xff\xd9":  # corrupt JPEG
+                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+
+        # Verify labels
+        if os.path.isfile(lb_file):
+            nf = 1  # label found
+            with open(lb_file) as f:
+                lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                lb = np.array(lb, dtype=np.float32)
+            nl = len(lb)
+            if nl:
+                assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                points = lb[:, 1:]
+                assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
+                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+
+                # All labels
+                max_cls = lb[:, 0].max()  # max label count
+                assert max_cls <= num_cls, (
+                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                    f"Possible class labels are 0-{num_cls - 1}"
+                )
+                _, i = np.unique(lb, axis=0, return_index=True)
+                if len(i) < nl:  # duplicate row check
+                    lb = lb[i]  # remove duplicates
+                    if segments:
+                        segments = [segments[x] for x in i]
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
+            else:
+                ne = 1  # label empty
+                lb = np.zeros((0,5), dtype=np.float32)
+        else:
+            nm = 1  # label missing
+            lb = np.zeros((0,5), dtype=np.float32)
+        lb = lb[:, :5]
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+    except Exception as e:
+        nc = 1
+        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+def exif_size(img: Image.Image):
+    """Returns exif-corrected PIL size."""
+    s = img.size  # (width, height)
+    if img.format == "JPEG":  # only support JPEG images
+        with contextlib.suppress(Exception):
+            exif = img.getexif()
+            if exif:
+                rotation = exif.get(274, None)  # the EXIF key for the orientation tag is 274
+                if rotation in {6, 8}:  # rotation 270 or 90
+                    s = s[1], s[0]
+    return s
+def save_dataset_cache_file(prefix, path, x, version):
+    """Save an   dataset *.cache dictionary x to path."""
+    x["version"] = version  # add cache version
+    if os.access(str(path.parent), os.W_OK):
+        if path.exists():
+            path.unlink()  # remove *.cache file if exists
+        np.save(str(path), x)  # save cache for next time
+        path.with_suffix(".cache.npy").rename(path)  # remove .npy suffix
+        LOGGER.info(f"{prefix}New cache created: {path}")
+    else:
+        LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
