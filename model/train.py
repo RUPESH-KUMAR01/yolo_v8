@@ -2,6 +2,7 @@ from copy import copy, deepcopy
 from datetime import datetime, timedelta
 import gc
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -137,8 +138,22 @@ class DetectionTrainer:
                     "i.e. 'yolo train resume model=path/to/last.pt'"
                 ) from e
         self.resume = resume
+    def _setup_ddp(self, world_size):
+        """Initializes and sets the DistributedDataParallel parameters for training."""
+        torch.cuda.set_device(RANK)
+        self.device = torch.device("cuda", RANK)
+        # LOGGER.info(f'DDP info: RANK {RANK}, WORLD_SIZE {world_size}, DEVICE {self.device}')
+        os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"  # set to enforce timeout
+        dist.init_process_group(
+            backend="nccl" if dist.is_nccl_available() else "gloo",
+            timeout=timedelta(seconds=10800),  # 3 hours
+            rank=RANK,
+            world_size=world_size,
+        )
     def _do_train(self, world_size=1):
         """Train completed, evaluate and plot if specified by arguments."""
+        if world_size > 1:
+            self._setup_ddp(world_size)
         self._setup_train(world_size)
 
         nb = len(self.train_loader)  # number of batches

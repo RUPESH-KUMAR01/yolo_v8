@@ -1,11 +1,12 @@
 import os
 from pathlib import Path
+from platform import platform
 # Now you can import from the 'utils' module
 from utils import IterableSimpleNamespace
 from utils.yaml_util import yaml_load
 
 
-
+MACOS, LINUX, WINDOWS = (platform.system() == x for x in ["Darwin", "Linux", "Windows"])  # environment booleans
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1)) 
 RANK = int(os.getenv("RANK", -1))

@@ -1,18 +1,16 @@
 
-
-
-
 from matplotlib import patches, pyplot as plt
+import torch
 from cfg import DEFAULT_CFG_DICT
+from data.build import build_dataloader
 from data.datset import YOLODataset, check_det_dataset
 from model.train import DetectionTrainer
-
 
 # dataset=YOLODataset(
 #     img_path=check_det_dataset("VOC.yaml")["train"],
 #     data=DEFAULT_CFG_DICT
 # )
-# # loader=build_dataloader(dataset=dataset,batch=16,workers=0)
+# loader=build_dataloader(dataset=dataset,batch=16,workers=0)
 
 
 # output=dataset[1000]
@@ -51,10 +49,7 @@ from model.train import DetectionTrainer
 training test
 """
 trainer=DetectionTrainer()
-def train_func(trainer):
-    trainer.train()
-
-train_func(trainer)
+trainer.train()
 """
 dataset test
 """
