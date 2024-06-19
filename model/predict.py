@@ -3,17 +3,23 @@ from pathlib import Path
 from platform import platform
 import re
 import threading
-
+from typing import List, Union
+from PIL import Image
 import cv2
 import numpy as np
 import torch
-from cfg import DEFAULT_CFG, LINUX, MACOS, WINDOWS
+from cfg import ASSETS, DEFAULT_CFG, LINUX, MACOS, WINDOWS
 from cfg.config import get_cfg
-from data import ops
+from data import IMG_FORMATS, VID_FORMATS, ops
 from data.augment import LetterBox
+from data.build import LoadImagesAndVideos
+from data.dataset import check_file
+from data.loaders import LOADERS, LoadPilAndNumpy, LoadScreenshots, LoadStreams, LoadTensor, SourceTypes, autocast_list
 from model import get_save_dir, increment_path
+from model.autobackend import AutoBackend
 from model.utils import check_imgsz, smart_inference_mode
 from utils import LOGGER, callbacks
+from utils.results import Results
 
 STREAM_WARNING = """
 WARNING ⚠️ inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
@@ -72,7 +78,7 @@ class DetectionPredictor:
         self.save_dir = get_save_dir(self.args)
         if self.args.conf is None:
             self.args.conf = 0.25  # default conf=0.25
-        self.done_warmup = False
+        self.done_warmup = self.args.done_warmup
         if self.args.show:
             self.args.show = check_imshow(warn=True)
 
@@ -138,10 +144,6 @@ class DetectionPredictor:
         letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
         return [letterbox(image=x) for x in im]
 
-    def postprocess(self, preds, img, orig_imgs):
-        """Post-processes predictions for an image and returns them."""
-        return preds
-
     def __call__(self, source=None, model=None, stream=False, *args, **kwargs):
         """Performs inference on an image or stream."""
         self.stream = stream
@@ -190,6 +192,7 @@ class DetectionPredictor:
     @smart_inference_mode()
     def stream_inference(self, source=None, model=None, *args, **kwargs):
         """Streams real-time inference on camera feed and saves results to file."""
+        print("Running")
         if self.args.verbose:
             LOGGER.info("")
 
@@ -308,7 +311,6 @@ class DetectionPredictor:
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
         string += f"{result.verbose()}{result.speed['inference']:.1f}ms"
-
         # Add predictions to image
         if self.args.save or self.args.show:
             self.plotted_img = result.plot(
@@ -318,7 +320,6 @@ class DetectionPredictor:
                 labels=self.args.show_labels,
                 im_gpu=None if self.args.retina_masks else im[i],
             )
-
         # Save results
         if self.args.save_txt:
             result.save_txt(f"{self.txt_path}.txt", save_conf=self.args.save_conf)
@@ -328,13 +329,11 @@ class DetectionPredictor:
             self.show(str(p))
         if self.args.save:
             self.save_predicted_images(str(self.save_dir / p.name), frame)
-
         return string
 
     def save_predicted_images(self, save_path="", frame=0):
         """Save video predictions as mp4 at specified path."""
         im = self.plotted_img
-
         # Save videos and streams
         if self.dataset.mode in {"stream", "video"}:
             fps = self.dataset.fps if self.dataset.mode == "video" else 30
@@ -398,3 +397,62 @@ class DetectionPredictor:
             img_path = self.batch[0][i]
             results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
         return results
+def check_source(source):
+    """Check source type and return corresponding flag values."""
+    webcam, screenshot, from_img, in_memory, tensor = False, False, False, False, False
+    if isinstance(source, (str, int, Path)):  # int for local usb camera
+        source = str(source)
+        is_file = Path(source).suffix[1:] in (IMG_FORMATS | VID_FORMATS)
+        is_url = source.lower().startswith(("https://", "http://", "rtsp://", "rtmp://", "tcp://"))
+        webcam = source.isnumeric() or source.endswith(".streams") or (is_url and not is_file)
+        screenshot = source.lower() == "screen"
+        if is_url and is_file:
+            source = check_file(source)  # download
+    elif isinstance(source, LOADERS):
+        in_memory = True
+    elif isinstance(source, (list, tuple)):
+        source = autocast_list(source)  # convert all list elements to PIL or np arrays
+        from_img = True
+    elif isinstance(source, (Image.Image, np.ndarray)):
+        from_img = True
+    elif isinstance(source, torch.Tensor):
+        tensor = True
+    else:
+        raise TypeError("Unsupported image type. For supported types see https://docs.ultralytics.com/modes/predict")
+
+    return source, webcam, screenshot, from_img, in_memory, tensor
+
+def load_inference_source(source=None, batch=1, vid_stride=1, buffer=False):
+    """
+    Loads an inference source for object detection and applies necessary transformations.
+
+    Args:
+        source (str, Path, Tensor, PIL.Image, np.ndarray): The input source for inference.
+        batch (int, optional): Batch size for dataloaders. Default is 1.
+        vid_stride (int, optional): The frame interval for video sources. Default is 1.
+        buffer (bool, optional): Determined whether stream frames will be buffered. Default is False.
+
+    Returns:
+        dataset (Dataset): A dataset object for the specified input source.
+    """
+    source, stream, screenshot, from_img, in_memory, tensor = check_source(source)
+    source_type = source.source_type if in_memory else SourceTypes(stream, screenshot, from_img, tensor)
+
+    # Dataloader
+    if tensor:
+        dataset = LoadTensor(source)
+    elif in_memory:
+        dataset = source
+    elif stream:
+        dataset = LoadStreams(source, vid_stride=vid_stride, buffer=buffer)
+    elif screenshot:
+        dataset = LoadScreenshots(source)
+    elif from_img:
+        dataset = LoadPilAndNumpy(source)
+    else:
+        dataset = LoadImagesAndVideos(source, batch=batch, vid_stride=vid_stride)
+
+    # Attach source types to the dataset
+    setattr(dataset, "source_type", source_type)
+
+    return dataset

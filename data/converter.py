@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from data.datset import YOLODataset
+from data.dataset import YOLODataset
 from data.ops import xywh2xyxy
 
 from model import increment_path

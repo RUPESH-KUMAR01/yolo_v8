@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from cfg import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS,weights_dir
 from data.augment import TORCH_1_9
-from data.datset import check_file
+from data.dataset import check_file
 from utils import LOGGER
 from utils.yaml_util import yaml_load
 

@@ -3,9 +3,9 @@ from matplotlib import patches, pyplot as plt
 import torch
 from cfg import DEFAULT_CFG_DICT
 from data.build import build_dataloader
-from data.datset import YOLODataset, check_det_dataset
+from data.dataset import YOLODataset, check_det_dataset
 from model.train import DetectionTrainer
-
+import time
 # dataset=YOLODataset(
 #     img_path=check_det_dataset("VOC.yaml")["train"],
 #     data=DEFAULT_CFG_DICT
@@ -49,7 +49,9 @@ from model.train import DetectionTrainer
 training test
 """
 trainer=DetectionTrainer()
-trainer.train()
+start_time=time.time()
+results=trainer.predict(source=r"C:\Users\thata\intern\code\pre-built-models\modified\classroom.mp4",stream=False)
+print(time.time()-start_time)
 """
 dataset test
 """

@@ -1,7 +1,1 @@
 ----->  in cfg/init after everything write the checks for the cfg -->*check_cfg(cfg(configuration file dict))*
-
-
------> take care of the checkamp function
-
-
------> 

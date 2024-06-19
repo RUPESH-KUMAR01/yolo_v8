@@ -7,10 +7,11 @@ import torch
 from cfg.config import get_cfg
 from data import converter, ops
 from data.build import build_dataloader, build_yolo_dataset
-from data.datset import check_det_dataset
+from data.dataset import check_det_dataset
 from data.metrics import ConfusionMatrix, DetMetrics, box_iou
 from data.ops import Profile
 from model import get_save_dir
+from model.autobackend import AutoBackend
 from model.utils import check_imgsz, smart_inference_mode
 from utils import LOGGER, TQDM, callbacks
 from utils.plotting import output_to_target, plot_images
@@ -193,7 +194,7 @@ class BaseValidator:
                     json.dump(self.jdict, f)  # flatten and save
                 stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
-                LOGGER.info(f"Results saved to {('bold', self.save_dir)}")
+                LOGGER.info(f"Results saved to {self.save_dir}")
             return stats
 
     def match_predictions(self, pred_classes, true_classes, iou):

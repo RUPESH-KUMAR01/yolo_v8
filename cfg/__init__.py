@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from platform import platform
+import platform
 # Now you can import from the 'utils' module
 from utils import IterableSimpleNamespace
 from utils.yaml_util import yaml_load
