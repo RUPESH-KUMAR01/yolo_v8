@@ -24,19 +24,10 @@ def get_save_dir(args, name=None):
         save_dir = args.save_dir
     else:
         project = args.project or (ROOT/RUNS_DIR) / args.task
-        name = name or args.name or f"{args.mode}-"
+        name = name or args.name or f"{args.mode}  "
         save_dir = increment_path(Path(project) / name, exist_ok=args.exist_ok if RANK in {-1, 0} else True)
 
     return Path(save_dir)
-
-def get_cpu_info():
-    """Return a string with system CPU information, i.e. 'Apple M2'."""
-    import cpuinfo  # pip install py-cpuinfo
-
-    k = "brand_raw", "hardware_raw", "arch_string_raw"  # info keys sorted by preference (not all keys always available)
-    info = cpuinfo.get_cpu_info()  # info dict
-    string = info.get(k[0] if k[0] in info else k[1] if k[1] in info else k[2], "unknown")
-    return string.replace("(R)", "").replace("CPU ", "").replace("@ ", "")
 
 
 

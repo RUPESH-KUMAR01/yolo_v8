@@ -5,7 +5,7 @@ task: detect # (str) YOLO task, i.e. detect, segment, classify, pose
 mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmark
 
 # Train settings -------------------------------------------------------------------------------------------------------
-model: C:\Users\thata\intern\code\pre-built-models\modified\runs\coco\weights\best.pt # (str, optional) path to model file, i.e. yolov8n.pt, yolov8n.yaml
+model: runs\coco\weights\best.pt # (str, optional) path to model file, i.e. yolov8n.pt, yolov8n.yaml
 data: "VOC.yaml" # (str, optional) path to data file, i.e. coco8.yaml
 epochs: 1 # (int) number of epochs to train for
 time: # (float, optional) number of hours to train for, overrides epochs if supplied

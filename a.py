@@ -48,10 +48,10 @@ import time
 """
 training test
 """
-trainer=DetectionTrainer()
-start_time=time.time()
-results=trainer.predict(source=r"C:\Users\thata\intern\code\pre-built-models\modified\classroom.mp4",stream=False)
-print(time.time()-start_time)
+# trainer=DetectionTrainer()
+# start_time=time.time()
+# results=trainer.predict(source=r"C:\Users\thata\intern\code\pre-built-models\modified\classroom.mp4",stream=False)
+# print(time.time()-start_time)
 """
 dataset test
 """

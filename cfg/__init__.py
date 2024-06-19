@@ -20,5 +20,5 @@ DEFAULT_CFG_KEYS = DEFAULT_CFG_DICT.keys()
 RUNS_DIR=r"runs"
 DATASETS_DIR=r"C:\Users\thata\intern\code\pre-built-models\datasets"
 ASSETS=Path(r"C:\Users\thata\intern\code\pre-built-models\modified\assets")
-# MODEL_PAR=r"C:\Users\thata\intern\code\pre-built-models\modified\cfg\model.yaml"
+
 weights_dir=r"weights"
