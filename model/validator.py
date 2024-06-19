@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 import numpy as np
 import torch
+from cfg import DEFAULT_CFG_DICT
 from cfg.config import get_cfg
 from data import converter, ops
 from data.build import build_dataloader, build_yolo_dataset
@@ -57,7 +58,7 @@ class BaseValidator:
             args (SimpleNamespace): Configuration for the validator.
             _callbacks (dict): Dictionary to store various callback functions.
         """
-        self.args = get_cfg(overrides=args)
+        self.args = get_cfg(DEFAULT_CFG_DICT,args)
         self.dataloader = dataloader
         self.pbar = pbar
         self.stride = None

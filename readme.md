@@ -20,9 +20,6 @@ This repository is a customized version of the Ultralytics YOLOv8 code, tailored
 3. **Update Input Settings**
    - The `main.py` script uses `cfg/default.yaml` for inputs. Modify the values in the `default.yaml` file before calling functions in the `main.py`.
 
-## Future Developments
-
-- **Argument Parser**: Modify the `main.py` file to include an `argparser` so that we don't have to change the `default.yaml` file every time.
 
 ## Additional Information
 - This repository contains weights that are trained on yolov8n.yaml configuration model in two different datasets.

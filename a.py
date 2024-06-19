@@ -59,3 +59,6 @@ dataset test
 
 # print(dataset[0])
 
+
+model=torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\runs\coco\weights\best.pt")
+print(model)
