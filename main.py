@@ -61,7 +61,7 @@ def main(overrides):
             webcam(overrides["model"] if "model" in overrides else None ,overrides["source"] if "source" in overrides else 0)
         else:
             overrides.pop("webcam")
-            predict_source(overrides=overrides,model=overrides["model"] if "model" in overrides else None)
+            predict_source(overrides=overrides,model=overrides["model"] if "model" in overrides else None,source=overrides["source"] if "source" in overrides else None)
     else:
         overrides.pop("webcam")
         train(overrides)
