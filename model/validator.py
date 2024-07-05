@@ -76,7 +76,7 @@ class BaseValidator:
         self.iouv = None
         self.jdict = None
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
-
+        self.args.rect=True
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
         if self.args.conf is None:
@@ -527,23 +527,6 @@ class DetectionValidator(BaseValidator):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        # return YOLODataset(
-        #     img_path=img_path,
-        #     imgsz=self.args.imgsz,
-        #     batch_size=batch,
-        #     augment=mode=="train",
-        #     hyp=self.args,
-        #     rect=self.args.rect or False,
-        #     cache=self.args.cache or None,
-        #     single_cls=self.args.single_cls or False,
-        #     stride=int(self.stride),
-        #     pad=0.0 if mode=="train" else 0.5,
-        #     prefix=(f"{mode}: "),
-        #     task=self.args.task,
-        #     classes=self.args.classes,
-        #     data=self.data,
-        #     fraction=self.args.fraction if  mode == "train" else 1.0
-        # )
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
 
     def get_dataloader(self, dataset_path, batch_size):
@@ -642,7 +625,6 @@ class DetectionValidator(BaseValidator):
             except Exception as e:
                 LOGGER.warning(f"{pkg} unable to run: {e}")
         return stats
-
 
 def coco80_to_coco91_class():
     """

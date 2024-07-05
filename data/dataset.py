@@ -7,15 +7,18 @@ import math
 from multiprocessing.pool import ThreadPool
 import os
 from pathlib import Path
+import random
 from typing import Optional, Union
 import cv2
 import numpy as np
+import psutil
 import torch
 from torch.utils.data import Dataset
 from PIL import Image, ImageOps
 from data import DEFAULT_CFG, IMG_FORMATS, yaml_load
 from data.augment import  Format, LetterBox, v8_transforms,Compose
 from data.instance import Instances
+from data.ops import resample_segments, segments2boxes
 from utils import LOGGER, NUM_THREADS
 from tqdm import tqdm as TQDM
 
@@ -92,8 +95,7 @@ def check_det_dataset(dataset, autodownload=True):
 
 
 
-
-class YOLODataset(Dataset):
+class BaseDataset(Dataset):
     """
     Base dataset class for loading and processing image data.
 
@@ -136,15 +138,9 @@ class YOLODataset(Dataset):
         single_cls=False,
         classes=None,
         fraction=1.0,
-        data=None,
-        task="detect"
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
-        # self.use_segments = task == "segment"
-        # self.use_keypoints = task == "pose"
-        # self.use_obb = task == "obb"
-        self.data = data
         self.img_path = img_path
         self.imgsz = imgsz
         self.augment = augment
@@ -171,11 +167,12 @@ class YOLODataset(Dataset):
         self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
         self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
         self.cache = cache.lower() if isinstance(cache, str) else "ram" if cache is True else None
-        # if (self.cache == "ram" and self.check_cache_ram()) or self.cache == "disk":
-        #     self.cache_images()
+        if (self.cache == "ram" and self.check_cache_ram()) or self.cache == "disk":
+            self.cache_images()
 
         # Transforms
         self.transforms = self.build_transforms(hyp=hyp)
+
     def get_img_files(self, img_path):
         """Read image files."""
         try:
@@ -259,47 +256,47 @@ class YOLODataset(Dataset):
 
         return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-    # def cache_images(self):
-    #     """Cache images to memory or disk."""
-    #     b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-    #     fcn, storage = (self.cache_images_to_disk, "Disk") if self.cache == "disk" else (self.load_image, "RAM")
-    #     with ThreadPool(NUM_THREADS) as pool:
-    #         results = pool.imap(fcn, range(self.ni))
-    #         pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
-    #         for i, x in pbar:
-    #             if self.cache == "disk":
-    #                 b += self.npy_files[i].stat().st_size
-    #             else:  # 'ram'
-    #                 self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
-    #                 b += self.ims[i].nbytes
-    #             pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
-    #         pbar.close()
+    def cache_images(self):
+        """Cache images to memory or disk."""
+        b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
+        fcn, storage = (self.cache_images_to_disk, "Disk") if self.cache == "disk" else (self.load_image, "RAM")
+        with ThreadPool(NUM_THREADS) as pool:
+            results = pool.imap(fcn, range(self.ni))
+            pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
+            for i, x in pbar:
+                if self.cache == "disk":
+                    b += self.npy_files[i].stat().st_size
+                else:  # 'ram'
+                    self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
+                    b += self.ims[i].nbytes
+                pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
+            pbar.close()
 
-    # def cache_images_to_disk(self, i):
-    #     """Saves an image as an *.npy file for faster loading."""
-    #     f = self.npy_files[i]
-    #     if not f.exists():
-    #         np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
+    def cache_images_to_disk(self, i):
+        """Saves an image as an *.npy file for faster loading."""
+        f = self.npy_files[i]
+        if not f.exists():
+            np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
 
-    # def check_cache_ram(self, safety_margin=0.5):
-    #     """Check image caching requirements vs available memory."""
-    #     b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-    #     n = min(self.ni, 30)  # extrapolate from 30 random images
-    #     for _ in range(n):
-    #         im = cv2.imread(random.choice(self.im_files))  # sample image
-    #         ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
-    #         b += im.nbytes * ratio**2
-    #     mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
-    #     mem = psutil.virtual_memory()
-    #     success = mem_required < mem.available  # to cache or not to cache, that is the question
-    #     if not success:
-    #         self.cache = None
-    #         LOGGER.info(
-    #             f"{self.prefix}{mem_required / gb:.1f}GB RAM required to cache images "
-    #             f"with {int(safety_margin * 100)}% safety margin but only "
-    #             f"{mem.available / gb:.1f}/{mem.total / gb:.1f}GB available, not caching images ⚠️"
-    #         )
-    #     return success
+    def check_cache_ram(self, safety_margin=0.5):
+        """Check image caching requirements vs available memory."""
+        b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
+        n = min(self.ni, 30)  # extrapolate from 30 random images
+        for _ in range(n):
+            im = cv2.imread(random.choice(self.im_files))  # sample image
+            ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
+            b += im.nbytes * ratio**2
+        mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
+        mem = psutil.virtual_memory()
+        success = mem_required < mem.available  # to cache or not to cache, that is the question
+        if not success:
+            self.cache = None
+            LOGGER.info(
+                f"{self.prefix}{mem_required / gb:.1f}GB RAM required to cache images "
+                f"with {int(safety_margin * 100)}% safety margin but only "
+                f"{mem.available / gb:.1f}/{mem.total / gb:.1f}GB available, not caching images ⚠️"
+            )
+        return success
 
     def set_rectangle(self):
         """Sets the shape of bounding boxes for YOLO detections as rectangles."""
@@ -346,7 +343,74 @@ class YOLODataset(Dataset):
     def __len__(self):
         """Returns the length of the labels list for the dataset."""
         return len(self.labels)
-    
+
+    def update_labels_info(self, label):
+        """Custom your label format here."""
+        return label
+
+    def build_transforms(self, hyp=None):
+        """
+        Users can customize augmentations here.
+
+        Example:
+            ```python
+            if self.augment:
+                # Training transforms
+                return Compose([])
+            else:
+                # Val transforms
+                return Compose([])
+            ```
+        """
+        raise NotImplementedError
+
+    def get_labels(self):
+        """
+        Users can customize their own format here.
+
+        Note:
+            Ensure output is a dictionary with the following keys:
+            ```python
+            dict(
+                im_file=im_file,
+                shape=shape,  # format: (height, width)
+                cls=cls,
+                bboxes=bboxes, # xywh
+                segments=segments,  # xy
+                keypoints=keypoints, # xy
+                normalized=True, # or False
+                bbox_format="xyxy",  # or xywh, ltwh
+            )
+            ```
+        """
+        raise NotImplementedError
+
+
+
+DATASET_CACHE_VERSION = "1.0.3"
+
+
+class YOLODataset(BaseDataset):
+    """
+    Dataset class for loading object detection and/or segmentation labels in YOLO format.
+
+    Args:
+        data (dict, optional): A dataset YAML dictionary. Defaults to None.
+        task (str): An explicit arg to point current task, Defaults to 'detect'.
+
+    Returns:
+        (torch.utils.data.Dataset): A PyTorch dataset object that can be used for training an object detection model.
+    """
+
+    def __init__(self, *args, data=None, task="detect", **kwargs):
+        """Initializes the YOLODataset with optional configurations for segments and keypoints."""
+        self.use_segments = task == "segment"
+        self.use_keypoints = task == "pose"
+        self.use_obb = task == "obb"
+        self.data = data
+        assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+        super().__init__(*args, **kwargs)
+
     def cache_labels(self, path=Path("./labels.cache")):
         """
         Cache dataset labels, check images and read shapes.
@@ -361,6 +425,12 @@ class YOLODataset(Dataset):
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
         total = len(self.im_files)
+        nkpt, ndim = self.data.get("kpt_shape", (0, 0))
+        if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
+            raise ValueError(
+                "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
+                "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
+            )
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
                 func=verify_image_label,
@@ -368,15 +438,14 @@ class YOLODataset(Dataset):
                     self.im_files,
                     self.label_files,
                     repeat(self.prefix),
-                    # repeat(self.use_keypoints),
+                    repeat(self.use_keypoints),
                     repeat(len(self.data["names"])),
-                    # repeat(nkpt),
-                    # repeat(ndim),
+                    repeat(nkpt),
+                    repeat(ndim),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            # for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
-            for im_file, lb, shape,  nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -388,8 +457,8 @@ class YOLODataset(Dataset):
                             "shape": shape,
                             "cls": lb[:, 0:1],  # n, 1
                             "bboxes": lb[:, 1:],  # n, 4
-                            # "segments": segments,
-                            # "keypoints": keypoint,
+                            "segments": segments,
+                            "keypoints": keypoint,
                             "normalized": True,
                             "bbox_format": "xywh",
                         }
@@ -402,11 +471,11 @@ class YOLODataset(Dataset):
         if msgs:
             LOGGER.info("\n".join(msgs))
         if nf == 0:
-            LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}.")
+            LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. ")
         x["hash"] = get_hash(self.label_files + self.im_files)
         x["results"] = nf, nm, ne, nc, len(self.im_files)
         x["msgs"] = msgs  # warnings
-        save_dataset_cache_file(self.prefix, path, x, "0000")
+        save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
         return x
 
     def get_labels(self):
@@ -415,6 +484,7 @@ class YOLODataset(Dataset):
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
+            assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
@@ -446,7 +516,7 @@ class YOLODataset(Dataset):
             for lb in labels:
                 lb["segments"] = []
         if len_cls == 0:
-            LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly.")
+            LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. ")
         return labels
 
     def build_transforms(self, hyp=None):
@@ -457,10 +527,13 @@ class YOLODataset(Dataset):
             transforms = v8_transforms(self, self.imgsz, hyp)
         else:
             transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
-        transforms.transforms.append(
+        transforms.append(
             Format(
                 bbox_format="xywh",
                 normalize=True,
+                return_mask=self.use_segments,
+                return_keypoint=self.use_keypoints,
+                return_obb=self.use_obb,
                 batch_idx=True,
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
@@ -485,9 +558,20 @@ class YOLODataset(Dataset):
             Can also support classification and semantic segmentation by adding or removing dict keys there.
         """
         bboxes = label.pop("bboxes")
+        segments = label.pop("segments", [])
+        keypoints = label.pop("keypoints", None)
         bbox_format = label.pop("bbox_format")
         normalized = label.pop("normalized")
-        label["instances"] = Instances(bboxes, bbox_format=bbox_format, normalized=normalized)
+
+        # NOTE: do NOT resample oriented boxes
+        segment_resamples = 100 if self.use_obb else 1000
+        if len(segments) > 0:
+            # list[np.array(1000, 2)] * num_samples
+            # (N, 1000, 2)
+            segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
+        else:
+            segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
+        label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
         return label
 
     @staticmethod
@@ -500,7 +584,7 @@ class YOLODataset(Dataset):
             value = values[i]
             if k == "img":
                 value = torch.stack(value, 0)
-            if k in {"bboxes", "cls"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
@@ -508,6 +592,8 @@ class YOLODataset(Dataset):
             new_batch["batch_idx"][i] += i  # add target image index for build_targets()
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
         return new_batch
+
+
     
 def exif_size(img: Image.Image):
     """Returns exif-corrected PIL size."""
@@ -523,7 +609,8 @@ def exif_size(img: Image.Image):
 
 def verify_image_label(args):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix,num_cls = args
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
     try:
         # Verify images
@@ -532,7 +619,7 @@ def verify_image_label(args):
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
         assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}."
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. "
         if im.format.lower() in {"jpg", "jpeg"}:
             with open(im_file, "rb") as f:
                 f.seek(-2, 2)
@@ -545,11 +632,19 @@ def verify_image_label(args):
             nf = 1  # label found
             with open(lb_file) as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
+                    classes = np.array([x[0] for x in lb], dtype=np.float32)
+                    segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                    lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
                 lb = np.array(lb, dtype=np.float32)
             nl = len(lb)
             if nl:
-                assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
-                points = lb[:, 1:]
+                if keypoint:
+                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
+                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                else:
+                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                    points = lb[:, 1:]
                 assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
                 assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 
@@ -567,18 +662,21 @@ def verify_image_label(args):
                     msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0,5), dtype=np.float32)
+                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         else:
             nm = 1  # label missing
-            lb = np.zeros((0,5), dtype=np.float32)
+            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+        if keypoint:
+            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            if ndim == 2:
+                kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
+                keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, :5]
-        # return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
-        return im_file, lb, shape, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1
         msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
-        # return [None, None, None, None, None, nm, nf, ne, nc, msg]
-        return [None, None, None, nm, nf, ne, nc, msg]
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
     
 
 def img2label_paths(img_paths):
