@@ -1,6 +1,5 @@
 #   YOLO 🚀, AGPL-3.0 license
 
-import contextlib
 import math
 import threading
 import warnings

@@ -527,13 +527,10 @@ class YOLODataset(BaseDataset):
             transforms = v8_transforms(self, self.imgsz, hyp)
         else:
             transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
-        transforms.append(
+        transforms.transforms.append(
             Format(
                 bbox_format="xywh",
                 normalize=True,
-                return_mask=self.use_segments,
-                return_keypoint=self.use_keypoints,
-                return_obb=self.use_obb,
                 batch_idx=True,
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
@@ -571,7 +568,7 @@ class YOLODataset(BaseDataset):
             segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
         else:
             segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
-        label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+        label["instances"] = Instances(bboxes,bbox_format=bbox_format, normalized=normalized)
         return label
 
     @staticmethod
