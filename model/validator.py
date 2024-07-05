@@ -17,7 +17,7 @@ from utils import LOGGER, callbacks
 from utils.plotting import output_to_target, plot_images
 from tqdm import tqdm as TQDM
 
-class BaseValidator:
+class DetectionValidator:
     """
     BaseValidator.
 
@@ -82,7 +82,16 @@ class BaseValidator:
         if self.args.conf is None:
             self.args.conf = 0.001  # default conf=0.001
         self.args.imgsz = check_imgsz(self.args.imgsz, max_dim=1)
-
+        self.nt_per_class = None
+        self.nt_per_image = None
+        self.is_coco = False
+        self.is_lvis = False
+        self.class_map = None
+        self.args.task = "detect"
+        self.metrics = DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot)
+        self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
+        self.niou = self.iouv.numel()
+        self.lb = []  # for autolabelling
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
 
@@ -250,103 +259,20 @@ class BaseValidator:
             callback(self)
 
     def get_dataloader(self, dataset_path, batch_size):
-        """Get data loader from dataset path and batch size."""
-        raise NotImplementedError("get_dataloader function not implemented for this validator")
+        """Construct and return dataloader."""
+        dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
+        return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1)  # return dataloader
 
-    def build_dataset(self, img_path):
-        """Build dataset."""
-        raise NotImplementedError("build_dataset function not implemented in validator")
+    def build_dataset(self, img_path, mode="val", batch=None):
+        """
+        Build YOLO Dataset.
 
-    def preprocess(self, batch):
-        """Preprocesses an input batch."""
-        return batch
-
-    def postprocess(self, preds):
-        """Describes and summarizes the purpose of 'postprocess()' but no details mentioned."""
-        return preds
-
-    def init_metrics(self, model):
-        """Initialize performance metrics for the YOLO model."""
-        pass
-
-    def update_metrics(self, preds, batch):
-        """Updates metrics based on predictions and batch."""
-        pass
-
-    def finalize_metrics(self, *args, **kwargs):
-        """Finalizes and returns all metrics."""
-        pass
-
-    def get_stats(self):
-        """Returns statistics about the model's performance."""
-        return {}
-
-    def check_stats(self, stats):
-        """Checks statistics."""
-        pass
-
-    def print_results(self):
-        """Prints the results of the model's predictions."""
-        pass
-
-    def get_desc(self):
-        """Get description of the YOLO model."""
-        pass
-
-    @property
-    def metric_keys(self):
-        """Returns the metric keys used in YOLO training/validation."""
-        return []
-
-    def on_plot(self, name, data=None):
-        """Registers plots (e.g. to be consumed in callbacks)"""
-        self.plots[Path(name)] = {"data": data, "timestamp": time.time()}
-
-    # TODO: may need to put these following functions into callback
-    def plot_val_samples(self, batch, ni):
-        """Plots validation samples during training."""
-        pass
-
-    def plot_predictions(self, batch, preds, ni):
-        """Plots YOLO model predictions on batch images."""
-        pass
-
-    def pred_to_json(self, preds, batch):
-        """Convert predictions to JSON format."""
-        pass
-
-    def eval_json(self, stats):
-        """Evaluate and return JSON format of prediction statistics."""
-        pass
-
-
-class DetectionValidator(BaseValidator):
-    """
-    A class extending the BaseValidator class for validation based on a detection model.
-
-    Example:
-        ```python
-        from ultralytics.models.yolo.detect import DetectionValidator
-
-        args = dict(model='yolov8n.pt', data='coco8.yaml')
-        validator = DetectionValidator(args=args)
-        validator()
-        ```
-    """
-
-    def __init__(self, dataloader=None, save_dir=None, pbar=None, args=None, _callbacks=None):
-        """Initialize detection model with necessary variables and settings."""
-        super().__init__(dataloader, save_dir, pbar, args, _callbacks)
-        self.nt_per_class = None
-        self.nt_per_image = None
-        self.is_coco = False
-        self.is_lvis = False
-        self.class_map = None
-        self.args.task = "detect"
-        self.metrics = DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot)
-        self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
-        self.niou = self.iouv.numel()
-        self.lb = []  # for autolabelling
+        Args:
+            img_path (str): Path to the folder containing images.
+            mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
+            batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
+        """
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
 
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -369,6 +295,19 @@ class DetectionValidator(BaseValidator):
 
         return batch
 
+
+    def postprocess(self, preds):
+        """Apply Non-maximum suppression to prediction outputs."""
+        return ops.non_max_suppression(
+            preds,
+            self.args.conf,
+            self.args.iou,
+            labels=self.lb,
+            multi_label=True,
+            agnostic=self.args.single_cls,
+            max_det=self.args.max_det,
+        )
+
     def init_metrics(self, model):
         """Initialize evaluation metrics for YOLO."""
         val = self.data.get(self.args.split, "")  # validation path
@@ -384,23 +323,6 @@ class DetectionValidator(BaseValidator):
         self.seen = 0
         self.jdict = []
         self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
-
-    def get_desc(self):
-        """Return a formatted string summarizing class metrics of YOLO model."""
-        return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
-
-    def postprocess(self, preds):
-        """Apply Non-maximum suppression to prediction outputs."""
-        return ops.non_max_suppression(
-            preds,
-            self.args.conf,
-            self.args.iou,
-            labels=self.lb,
-            multi_label=True,
-            agnostic=self.args.single_cls,
-            max_det=self.args.max_det,
-        )
-
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
         idx = batch["batch_idx"] == si
@@ -413,7 +335,6 @@ class DetectionValidator(BaseValidator):
             bbox = ops.xywh2xyxy(bbox) * torch.tensor(imgsz, device=self.device)[[1, 0, 1, 0]]  # target boxes
             ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
         return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
-
     def _prepare_pred(self, pred, pbatch):
         """Prepares a batch of images and annotations for validation."""
         predn = pred.clone()
@@ -482,6 +403,10 @@ class DetectionValidator(BaseValidator):
             self.metrics.process(**stats)
         return self.metrics.results_dict
 
+    def check_stats(self, stats):
+        """Checks statistics."""
+        pass
+
     def print_results(self):
         """Prints training/validation set metrics per class."""
         pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)  # print format
@@ -502,6 +427,9 @@ class DetectionValidator(BaseValidator):
                     save_dir=self.save_dir, names=self.names.values(), normalize=normalize, on_plot=self.on_plot
                 )
 
+    def get_desc(self):
+        """Return a formatted string summarizing class metrics of YOLO model."""
+        return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
     def _process_batch(self, detections, gt_bboxes, gt_cls):
         """
         Return correct prediction matrix.
@@ -517,23 +445,16 @@ class DetectionValidator(BaseValidator):
         """
         iou = box_iou(gt_bboxes, detections[:, :4])
         return self.match_predictions(detections[:, 5], gt_cls, iou)
+    @property
+    def metric_keys(self):
+        """Returns the metric keys used in YOLO training/validation."""
+        return []
 
-    def build_dataset(self, img_path, mode="val", batch=None):
-        """
-        Build YOLO Dataset.
+    def on_plot(self, name, data=None):
+        """Registers plots (e.g. to be consumed in callbacks)"""
+        self.plots[Path(name)] = {"data": data, "timestamp": time.time()}
 
-        Args:
-            img_path (str): Path to the folder containing images.
-            mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
-            batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
-        """
-        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
-
-    def get_dataloader(self, dataset_path, batch_size):
-        """Construct and return dataloader."""
-        dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
-        return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1)  # return dataloader
-
+    # TODO: may need to put these following functions into callback
     def plot_val_samples(self, batch, ni):
         """Plot validation image samples."""
         plot_images(
@@ -566,7 +487,6 @@ class DetectionValidator(BaseValidator):
             line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
             with open(file, "a") as f:
                 f.write(("%g " * len(line)).rstrip() % line + "\n")
-
     def pred_to_json(self, predn, filename):
         """Serialize YOLO predictions to COCO json format."""
         stem = Path(filename).stem

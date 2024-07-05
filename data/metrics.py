@@ -10,7 +10,6 @@ import numpy as np
 import torch
 
 from utils import LOGGER, SimpleClass
-from utils.tryexcept import TryExcept
 def plt_settings(rcparams=None, backend="Agg"):
     """
     Decorator to temporarily set rc parameters and the backend for a plotting function.
@@ -424,7 +423,6 @@ class ConfusionMatrix:
         # fn = self.matrix.sum(0) - tp  # false negatives (missed detections)
         return (tp[:-1], fp[:-1]) if self.task == "detect" else (tp, fp)  # remove background class if task=detect
 
-    @TryExcept("WARNING ⚠️ ConfusionMatrix plot failure")
     @plt_settings()
     def plot(self, normalize=True, save_dir="", names=(), on_plot=None):
         """
