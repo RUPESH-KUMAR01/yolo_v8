@@ -11,7 +11,7 @@ def train(overrides):
 def val(overrides):
     validator=DetectionValidator(args=overrides)
     validator()
-def predict_source(overrides,model=r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train3\weights\best.pt",source=r"assets\bus.jpg"):
+def predict_source(overrides,model=r"runs\detect\train\weights\best.pt",source=r"assets\bus.jpg"):
     model=model if "model" not in overrides else overrides["model"]
     source=source if "source" not in overrides else overrides["source"]
     predictor=DetectionPredictor(cfg=overrides)

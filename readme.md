@@ -1,28 +1,75 @@
+markdown
+Copy code
 # YOLOv8 Custom Object Detection
 
 This repository is a customized version of the Ultralytics YOLOv8 code, tailored specifically for object detection. The original YOLOv8 implementation by Ultralytics supports multiple image tasks such as segmentation, pose estimation, and oriented bounding boxes. However, this repository focuses solely on object detection, simplifying the code and making it easier to read and modify.
 
 ## Features
-
 - **Simplified Code**: The codebase has been streamlined for easier readability and modification.
 - **Focused Functionality**: Removed support for segmentation, pose estimation, and oriented bounding boxes to concentrate solely on object detection.
 
-## Instructions to Use
 
-1. **Clone the Repository**
-    ```bash
-    git clone https://github.com/RUPESH-KUMAR01/yolo_v8.git
-    ```
+### Training
 
-2. **Configure Paths**
-   - Update the `DATASETS_DIR` and `ASSETS` variables in the `cfg/__init__.py` file according to your usage.
+To train the model, use the following command:
 
-3. **Update Input Settings**
-   - The `main.py` script uses `cfg/default.yaml` for inputs. Modify the values in the `default.yaml` file before calling functions in the `main.py`.
+```bash
+python main.py --mode train --model yolov8.yaml --data VOC.yaml --epochs 10
+```
 
+#### Training Options
+
+- `--model`: Path to the model configuration file (default: `yolov8.yaml`).
+- `--data`: Path to the data configuration file (default: `VOC.yaml`).
+- `--epochs`: Number of epochs to train for (default: 1).
+
+Additional options can be found in `main.py`.
+
+### Validation
+
+To validate the model, use the following command:
+
+```bash
+python main.py --mode val --model runs\detect\train\weights\best.pt --data VOC.yaml
+```
+
+#### Validation Options
+
+- `--model`: Path to the model configuration file (default: `yolov8.yaml`).
+- `--data`: Path to the data configuration file (default: `VOC.yaml`).
+
+Additional options can be found in `main.py`.
+
+### Prediction
+
+To run predictions on images, use the following command:
+
+```bash
+python main.py --mode predict --model runs/detect/train/weights/best.pt --source assets/bus.jpg
+```
+
+To use a webcam for predictions, use the following command:
+
+```bash
+python main.py --mode predict --model runs/detect/train/weights/best.pt --webcam True
+```
+
+#### Prediction Options
+
+- `--model`: Path to the model weights file (default: `runs/detect/train/weights/best.pt`).
+- `--source`: Source directory for images or videos (default: `assets`).
+- `--webcam`: Use the system webcam for live predictions (default: `False`).
+
+Additional options can be found in `main.py`.
+
+## Available Weights
+
+This repository contains weights trained on the following datasets:
+
+- Pascal VOC dataset: Trained for 10 epochs
+
+Those weights are being used as default for val and predict 
 
 ## Additional Information
-- This repository contains weights that are trained on yolov8n.yaml configuration model in two different datasets.
-    1. Pascal VOC dataset trained for 10 epochs
-    2. coco dataset trained for 2 epochs
-- In the default the weights from the coco(trained for 2 epochs) is being used.
+
+For a comprehensive list of all configurable options, refer to the argument parser in `main.py`.
