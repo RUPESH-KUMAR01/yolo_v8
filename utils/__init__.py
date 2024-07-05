@@ -1,13 +1,11 @@
 import logging
 import os
 import sys
-from types import SimpleNamespace
 RANK = int(os.getenv("RANK", -1))
 NUM_THREADS = min(8, max(1, os.cpu_count() - 1))  # number of YOLO multiprocessing threads
 VERBOSE = str(os.getenv("YOLO_VERBOSE", True)).lower() == "true"  # global verbose mode
-TQDM_BAR_FORMAT = "{l_bar}{bar:10}{r_bar}" if VERBOSE else None  # tqdm bar format
+import numpy as np
 from psutil import WINDOWS
-from tqdm import tqdm as tqdm_original
 LOGGING_NAME="custom_modified"
 version="1.0.0"
 TESTS_RUNNING=False
@@ -86,55 +84,82 @@ class SimpleClass:
         """Custom attribute access error message with helpful information."""
         name = self.__class__.__name__
         raise AttributeError(f"'{name}' object has no attribute '{attr}'. See valid attributes below.\n{self.__doc__}")
-    
+class Colors:
+    """
+    Ultralytics default color palette https://ultralytics.com/.
 
+    This class provides methods to work with the Ultralytics color palette, including converting hex color codes to
+    RGB values.
 
-    
-class IterableSimpleNamespace(SimpleNamespace):
-    """Ultralytics IterableSimpleNamespace is an extension class of SimpleNamespace that adds iterable functionality and
-    enables usage with dict() and for loops.
+    Attributes:
+        palette (list of tuple): List of RGB color values.
+        n (int): The number of colors in the palette.
+        pose_palette (np.ndarray): A specific color palette array with dtype np.uint8.
     """
 
-    def __iter__(self):
-        """Return an iterator of key-value pairs from the namespace's attributes."""
-        return iter(vars(self).items())
-
-    def __str__(self):
-        """Return a human-readable string representation of the object."""
-        return "\n".join(f"{k}={v}" for k, v in vars(self).items())
-
-    def __getattr__(self, attr):
-        """Custom attribute access error message with helpful information."""
-        name = self.__class__.__name__
-        raise AttributeError(
-            f"""
-            '{name}' object has no attribute '{attr}'. This may be caused by a modified or out of date ultralytics
-            'default.yaml' file.\nPlease update your code with 'pip install -U ultralytics' and if necessary replace
-            with the latest version from
-            https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/default.yaml
-            """
+    def __init__(self):
+        """Initialize colors as hex = matplotlib.colors.TABLEAU_COLORS.values()."""
+        hexs = (
+            "042AFF",
+            "0BDBEB",
+            "F3F3F3",
+            "00DFB7",
+            "111F68",
+            "FF6FDD",
+            "FF444F",
+            "CCED00",
+            "00F344",
+            "BD00FF",
+            "00B4FF",
+            "DD00BA",
+            "00FFFF",
+            "26C000",
+            "01FFB3",
+            "7D24FF",
+            "7B0068",
+            "FF1B6C",
+            "FC6D2F",
+            "A2FF0B",
+        )
+        self.palette = [self.hex2rgb(f"#{c}") for c in hexs]
+        self.n = len(self.palette)
+        self.pose_palette = np.array(
+            [
+                [255, 128, 0],
+                [255, 153, 51],
+                [255, 178, 102],
+                [230, 230, 0],
+                [255, 153, 255],
+                [153, 204, 255],
+                [255, 102, 255],
+                [255, 51, 255],
+                [102, 178, 255],
+                [51, 153, 255],
+                [255, 153, 153],
+                [255, 102, 102],
+                [255, 51, 51],
+                [153, 255, 153],
+                [102, 255, 102],
+                [51, 255, 51],
+                [0, 255, 0],
+                [0, 0, 255],
+                [255, 0, 0],
+                [255, 255, 255],
+            ],
+            dtype=np.uint8,
         )
 
-    def get(self, key, default=None):
-        """Return the value of the specified key if it exists; otherwise, return the default value."""
-        return getattr(self, key, default)
-    
+    def __call__(self, i, bgr=False):
+        """Converts hex color codes to RGB values."""
+        c = self.palette[int(i) % self.n]
+        return (c[2], c[1], c[0]) if bgr else c
 
-class TQDM(tqdm_original):
-    """
-    Custom Ultralytics tqdm class with different default arguments.
+    @staticmethod
+    def hex2rgb(h):
+        """Converts hex color codes to RGB values (i.e. default PIL order)."""
+        return tuple(int(h[1 + i : 1 + i + 2], 16) for i in (0, 2, 4))
 
-    Args:
-        *args (list): Positional arguments passed to original tqdm.
-        **kwargs (any): Keyword arguments, with custom defaults applied.
-    """
 
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize custom Ultralytics tqdm class with different default arguments.
+colors = Colors()  # create instance for 'from utils.plots import colors'
 
-        Note these can still be overridden when calling TQDM.
-        """
-        kwargs["disable"] = not VERBOSE or kwargs.get("disable", False)  # logical 'and' with default value if passed
-        kwargs.setdefault("bar_format", TQDM_BAR_FORMAT)  # override default value if passed
-        super().__init__(*args, **kwargs)
+

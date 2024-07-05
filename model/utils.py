@@ -5,11 +5,11 @@ from pathlib import Path
 import time
 import torch
 from torch import nn
-from cfg import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS,weights_dir
+from data import DEFAULT_CFG_DICT, weights_dir
+from data import DEFAULT_CFG_KEYS, yaml_load
 from data.augment import TORCH_1_9
 from data.dataset import check_file
 from utils import LOGGER
-from utils.yaml_util import yaml_load
 
 
 
@@ -35,34 +35,6 @@ def check_suffix(file="yolov8n.pt", suffix=".pt", msg=""):
             if len(s):
                 assert s in suffix, f"{msg}{f} acceptable suffix is {suffix}, not {s}"
 
-def attempt_download_asset(file, repo="ultralytics/assets", release="v8.2.0", **kwargs):
-    """
-    Attempt to download a file from GitHub release assets if it is not found locally. The function checks for the file
-    locally first, then tries to download it from the specified GitHub repository release.
-
-    Args:
-        file (str | Path): The filename or file path to be downloaded.
-        repo (str, optional): The GitHub repository in the format 'owner/repo'. Defaults to 'ultralytics/assets'.
-        release (str, optional): The specific release version to be downloaded. Defaults to 'v8.2.0'.
-        **kwargs (any): Additional keyword arguments for the download process.
-
-    Returns:
-        (str): The path to the downloaded file.
-
-    Example:
-        ```python
-        file_path = attempt_download_asset('yolov8n.pt', repo='ultralytics/assets', release='latest')
-        ```
-    """
-
-
-    # YOLOv3/5u updates
-    file = str(file)
-    file = check_file(file=file,hard=False)
-    if not len(file)==0:
-        return str(file)
-    elif (weights_dir / file).exists():
-        return str(weights_dir / file)
 def torch_safe_load(weight):
     """
     This function attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised,
@@ -77,7 +49,12 @@ def torch_safe_load(weight):
     """
 
     check_suffix(file=weight, suffix=".pt")
-    file = attempt_download_asset(weight)  # search online if missing locally
+    file=str(weight)
+    file = check_file(file=file,hard=False)
+    if not len(file)==0:
+        file=str(file)
+    elif (weights_dir / file).exists():
+        file=str(weights_dir / file)
     try:
         ckpt = torch.load(file)
 
@@ -146,10 +123,6 @@ def smart_inference_mode():
 
     return decorate
 
-def check_yaml(file, suffix=(".yaml", ".yml"), hard=True):
-    """Search/download YAML file (if necessary) and return path, checking suffix."""
-    return check_file(file, suffix, hard=hard)
-
 def yaml_model_load(path):
     """Load a YOLOv8 model from a YAML file."""
     import re
@@ -161,7 +134,7 @@ def yaml_model_load(path):
         path = path.with_name(new_stem + path.suffix)
 
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
-    yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
+    yaml_file = check_file(unified_path,suffix=(".yaml", ".yml"), hard=False) or check_file(path,suffix=(".yaml", ".yml"),hard=True)
     d = yaml_load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)

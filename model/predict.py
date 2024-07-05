@@ -3,21 +3,20 @@ from pathlib import Path
 from platform import platform
 import re
 import threading
-from typing import List, Union
+import time
+from types import SimpleNamespace
 from PIL import Image
 import cv2
 import numpy as np
 import torch
-from cfg import ASSETS, DEFAULT_CFG, LINUX, MACOS, WINDOWS
-from cfg.config import get_cfg
+from data import LINUX, MACOS, WINDOWS
 from data import IMG_FORMATS, VID_FORMATS, ops
 from data.augment import LetterBox
-from data.build import LoadImagesAndVideos
 from data.dataset import check_file
-from data.loaders import LOADERS, LoadPilAndNumpy, LoadScreenshots, LoadStreams, LoadTensor, SourceTypes, autocast_list
+from data.loaders import LOADERS, LoadImagesAndVideos, LoadPilAndNumpy, LoadScreenshots, LoadStreams, LoadTensor, SourceTypes, autocast_list
 from model import get_save_dir, increment_path
 from model.autobackend import AutoBackend
-from model.utils import check_imgsz, smart_inference_mode
+from model.utils import attempt_load_one_weight, check_imgsz, smart_inference_mode
 from utils import LOGGER, callbacks
 from utils.results import Results
 
@@ -66,7 +65,7 @@ class DetectionPredictor:
         vid_writer (dict): Dictionary of {save_path: video_writer, ...} writer for saving video output.
     """
 
-    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
+    def __init__(self, cfg=None, overrides=None, _callbacks=None):
         """
         Initializes the BasePredictor class.
 
@@ -74,7 +73,7 @@ class DetectionPredictor:
             cfg (str, optional): Path to a configuration file. Defaults to DEFAULT_CFG.
             overrides (dict, optional): Configuration overrides. Defaults to None.
         """
-        self.args = get_cfg(cfg, overrides)
+        self.args = SimpleNamespace(**cfg)
         self.save_dir = get_save_dir(self.args)
         if self.args.conf is None:
             self.args.conf = 0.25  # default conf=0.25
@@ -98,6 +97,7 @@ class DetectionPredictor:
         self.transforms = None
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         self.txt_path = None
+        self.args.batch=1
         self._lock = threading.Lock()  # for automatic thread-safe inference
         callbacks.add_integration_callbacks(self)
 
@@ -114,7 +114,6 @@ class DetectionPredictor:
             im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW, (n, 3, h, w)
             im = np.ascontiguousarray(im)  # contiguous
             im = torch.from_numpy(im)
-
         im = im.to(self.device)
         im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
         if not_tensor:
@@ -123,12 +122,7 @@ class DetectionPredictor:
 
     def inference(self, im, *args, **kwargs):
         """Runs inference on a given image using the specified model and arguments."""
-        visualize = (
-            increment_path(self.save_dir / Path(self.batch[0][0]).stem, mkdir=True)
-            if self.args.visualize and (not self.source_type.tensor)
-            else False
-        )
-        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, *args, **kwargs)
+        return self.model(im, augment=self.args.augment, visualize=False, embed=self.args.embed, *args, **kwargs)
 
     def pre_transform(self, im):
         """
@@ -293,6 +287,15 @@ class DetectionPredictor:
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
         self.model.eval()
+        # model,ckpt=attempt_load_one_weight(model,device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),inplace=True,fuse=True)
+        # stride = max(int(model.stride.max()), 32)  # model stride
+        # names = model.module.names if hasattr(model, "module") else model.names  # get class names
+        # model.half() if self.args.half else model.float()
+        # model.fuse()
+        # # self.model = model 
+        # for p in model.parameters():
+        #     p.requires_grad = False
+        # self.model.eval()
 
     def write_results(self, i, p, im, s):
         """Write inference results to a file or directory."""
@@ -341,7 +344,7 @@ class DetectionPredictor:
             if save_path not in self.vid_writer:  # new video
                 if self.args.save_frames:
                     Path(frames_path).mkdir(parents=True, exist_ok=True)
-                suffix, fourcc = (".mp4", "avc1") if MACOS else (".avi", "WMV2") if WINDOWS else (".avi", "MJPG")
+                suffix, fourcc = (".avi", "WMV2")
                 self.vid_writer[save_path] = cv2.VideoWriter(
                     filename=str(Path(save_path).with_suffix(suffix)),
                     fourcc=cv2.VideoWriter_fourcc(*fourcc),

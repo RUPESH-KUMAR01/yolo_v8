@@ -2,21 +2,20 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 import numpy as np
 import torch
-from cfg import DEFAULT_CFG_DICT
-from cfg.config import get_cfg
-from data import converter, ops
+from data import ops
 from data.build import build_dataloader, build_yolo_dataset
-from data.dataset import check_det_dataset
+from data.dataset import YOLODataset, check_det_dataset
 from data.metrics import ConfusionMatrix, DetMetrics, box_iou
 from data.ops import Profile
 from model import get_save_dir
 from model.autobackend import AutoBackend
 from model.utils import check_imgsz, smart_inference_mode
-from utils import LOGGER, TQDM, callbacks
+from utils import LOGGER, callbacks
 from utils.plotting import output_to_target, plot_images
-
+from tqdm import tqdm as TQDM
 
 class BaseValidator:
     """
@@ -58,7 +57,10 @@ class BaseValidator:
             args (SimpleNamespace): Configuration for the validator.
             _callbacks (dict): Dictionary to store various callback functions.
         """
-        self.args = get_cfg(DEFAULT_CFG_DICT,args)
+        if isinstance(args,SimpleNamespace):
+            self.args=args
+        else:
+            self.args = SimpleNamespace(**args)
         self.dataloader = dataloader
         self.pbar = pbar
         self.stride = None
@@ -123,8 +125,6 @@ class BaseValidator:
 
             if str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
                 self.data = check_det_dataset(self.args.data)
-            # elif self.args.task == "classify":
-            #     self.data = check_cls_dataset(self.args.data, split=self.args.split)
             else:
                 raise FileNotFoundError((f"Dataset '{self.args.data}' for task={self.args.task} not found ❌"))
 
@@ -198,7 +198,7 @@ class BaseValidator:
                 LOGGER.info(f"Results saved to {self.save_dir}")
             return stats
 
-    def match_predictions(self, pred_classes, true_classes, iou):
+    def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):
         """
         Matches predictions to ground truth objects (pred_classes, true_classes) using IoU.
 
@@ -218,16 +218,26 @@ class BaseValidator:
         iou = iou * correct_class  # zero out the wrong classes
         iou = iou.cpu().numpy()
         for i, threshold in enumerate(self.iouv.cpu().tolist()):
-        
-            matches = np.nonzero(iou >= threshold)  # IoU > threshold and classes match
-            matches = np.array(matches).T
-            if matches.shape[0]:
-                if matches.shape[0] > 1:
-                    matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
-                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                    # matches = matches[matches[:, 2].argsort()[::-1]]
-                    matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-                correct[matches[:, 1].astype(int), i] = True
+            if use_scipy:
+                # WARNING: known issue that reduces mAP in https://github.com/ultralytics/ultralytics/pull/4708
+                import scipy  # scope import to avoid importing for all commands
+
+                cost_matrix = iou * (iou >= threshold)
+                if cost_matrix.any():
+                    labels_idx, detections_idx = scipy.optimize.linear_sum_assignment(cost_matrix, maximize=True)
+                    valid = cost_matrix[labels_idx, detections_idx] > 0
+                    if valid.any():
+                        correct[detections_idx[valid], i] = True
+            else:
+                matches = np.nonzero(iou >= threshold)  # IoU > threshold and classes match
+                matches = np.array(matches).T
+                if matches.shape[0]:
+                    if matches.shape[0] > 1:
+                        matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                        matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                        # matches = matches[matches[:, 2].argsort()[::-1]]
+                        matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+                    correct[matches[:, 1].astype(int), i] = True
         return torch.tensor(correct, dtype=torch.bool, device=pred_classes.device)
 
     def add_callback(self, event: str, callback):
@@ -344,7 +354,6 @@ class DetectionValidator(BaseValidator):
         batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
         for k in ["batch_idx", "cls", "bboxes"]:
             batch[k] = batch[k].to(self.device)
-
         if self.args.save_hybrid:
             height, width = batch["img"].shape[2:]
             nb = len(batch["img"])
@@ -365,7 +374,7 @@ class DetectionValidator(BaseValidator):
         val = self.data.get(self.args.split, "")  # validation path
         self.is_coco = isinstance(val, str) and "coco" in val and val.endswith(f"{os.sep}val2017.txt")  # is COCO
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
-        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(len(model.names)))
+        self.class_map = coco80_to_coco91_class() if self.is_coco else list(range(len(model.names)))
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training  # run on final val if training COCO
         self.names = model.names
         self.nc = len(model.names)
@@ -518,6 +527,23 @@ class DetectionValidator(BaseValidator):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
+        # return YOLODataset(
+        #     img_path=img_path,
+        #     imgsz=self.args.imgsz,
+        #     batch_size=batch,
+        #     augment=mode=="train",
+        #     hyp=self.args,
+        #     rect=self.args.rect or False,
+        #     cache=self.args.cache or None,
+        #     single_cls=self.args.single_cls or False,
+        #     stride=int(self.stride),
+        #     pad=0.0 if mode=="train" else 0.5,
+        #     prefix=(f"{mode}: "),
+        #     task=self.args.task,
+        #     classes=self.args.classes,
+        #     data=self.data,
+        #     fraction=self.args.fraction if  mode == "train" else 1.0
+        # )
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
 
     def get_dataloader(self, dataset_path, batch_size):
@@ -589,6 +615,7 @@ class DetectionValidator(BaseValidator):
             try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
                 for x in pred_json, anno_json:
                     assert x.is_file(), f"{x} file not found"
+                # check_requirements("pycocotools>=2.0.6" if self.is_coco else "lvis>=0.5.3")
                 if self.is_coco:
                     from pycocotools.coco import COCO  # noqa
                     from pycocotools.cocoeval import COCOeval  # noqa
@@ -615,3 +642,102 @@ class DetectionValidator(BaseValidator):
             except Exception as e:
                 LOGGER.warning(f"{pkg} unable to run: {e}")
         return stats
+
+
+def coco80_to_coco91_class():
+    """
+    Converts 80-index (val2014) to 91-index (paper).
+    For details see https://tech.amikelive.com/node-718/what-object-categories-labels-are-in-coco-dataset/.
+
+    Example:
+        ```python
+        import numpy as np
+
+        a = np.loadtxt('data/coco.names', dtype='str', delimiter='\n')
+        b = np.loadtxt('data/coco_paper.names', dtype='str', delimiter='\n')
+        x1 = [list(a[i] == b).index(True) + 1 for i in range(80)]  # darknet to coco
+        x2 = [list(b[i] == a).index(True) if any(b[i] == a) else None for i in range(91)]  # coco to darknet
+        ```
+    """
+    return [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        27,
+        28,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        67,
+        70,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+    ]

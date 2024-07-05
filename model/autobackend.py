@@ -1,23 +1,15 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
-import ast
 import contextlib
-import json
-import platform
-import zipfile
-from collections import OrderedDict, namedtuple
 from pathlib import Path
-from model.utils import attempt_load_one_weight, check_suffix
-import cv2
+from data import ROOT, yaml_load
+from data.dataset import check_file
+from model.utils import attempt_load_one_weight
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 
-from cfg import ROOT
-from model.utils import attempt_download_asset, check_yaml
 from utils import LOGGER
-from utils.yaml_util import yaml_load
 
 
 
@@ -48,7 +40,7 @@ def default_class_names(data=None):
     """Applies default class names to an input YAML file or returns numerical class names."""
     if data:
         with contextlib.suppress(Exception):
-            return yaml_load(check_yaml(data))["names"]
+            return yaml_load(check_file(data))["names"]
     return {i: f"class{i}" for i in range(999)}  # return default if above errors
 
 

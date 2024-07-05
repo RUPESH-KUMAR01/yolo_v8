@@ -113,10 +113,6 @@ class Results(SimpleClass):
         self.orig_img = orig_img
         self.orig_shape = orig_img.shape[:2]
         self.boxes = Boxes(boxes, self.orig_shape) if boxes is not None else None  # native size boxes
-        self.masks = Masks(masks, self.orig_shape) if masks is not None else None  # native size or imgsz masks
-        self.probs = Probs(probs) if probs is not None else None
-        self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
-        self.obb = OBB(obb, self.orig_shape) if obb is not None else None
         self.speed = speed if speed is not None else {"preprocess": None, "inference": None, "postprocess": None}
         self.names = names
         self.path = path
@@ -138,12 +134,8 @@ class Results(SimpleClass):
         """Update the boxes, masks, and probs attributes of the Results object."""
         if boxes is not None:
             self.boxes = Boxes(ops.clip_boxes(boxes, self.orig_shape), self.orig_shape)
-        if masks is not None:
-            self.masks = Masks(masks, self.orig_shape)
         if probs is not None:
             self.probs = probs
-        if obb is not None:
-            self.obb = OBB(obb, self.orig_shape)
 
     def _apply(self, fn, *args, **kwargs):
         """
@@ -246,32 +238,16 @@ class Results(SimpleClass):
             img = (self.orig_img[0].detach().permute(1, 2, 0).contiguous() * 255).to(torch.uint8).cpu().numpy()
 
         names = self.names
-        is_obb = self.obb is not None
-        pred_boxes, show_boxes = self.obb if is_obb else self.boxes, boxes
-        pred_masks, show_masks = self.masks, masks
-        pred_probs, show_probs = self.probs, probs
+        pred_boxes, show_boxes = self.boxes, boxes
         annotator = Annotator(
             deepcopy(self.orig_img if img is None else img),
             line_width,
             font_size,
             font,
-            pil or (pred_probs is not None and show_probs),  # Classify tasks default to pil=True
+            pil ,  # Classify tasks default to pil=True
             example=names,
         )
 
-        # Plot Segment results
-        if pred_masks and show_masks:
-            if im_gpu is None:
-                img = LetterBox(pred_masks.shape[1:])(image=annotator.result())
-                im_gpu = (
-                    torch.as_tensor(img, dtype=torch.float16, device=pred_masks.data.device)
-                    .permute(2, 0, 1)
-                    .flip(0)
-                    .contiguous()
-                    / 255
-                )
-            idx = pred_boxes.cls if pred_boxes else range(len(pred_masks))
-            annotator.masks(pred_masks.data, colors=[colors(x, True) for x in idx], im_gpu=im_gpu)
 
         # Plot Detect results
         if pred_boxes is not None and show_boxes:
@@ -279,19 +255,9 @@ class Results(SimpleClass):
                 c, conf, id = int(d.cls), float(d.conf) if conf else None, None if d.id is None else int(d.id.item())
                 name = ("" if id is None else f"id:{id} ") + names[c]
                 label = (f"{name} {conf:.2f}" if conf else name) if labels else None
-                box = d.xyxyxyxy.reshape(-1, 4, 2).squeeze() if is_obb else d.xyxy.squeeze()
-                annotator.box_label(box, label, color=colors(c, True), rotated=is_obb)
+                box = d.xyxy.squeeze()
+                annotator.box_label(box, label, color=colors(c, True), rotated=False)
 
-        # Plot Classify results
-        if pred_probs is not None and show_probs:
-            text = ",\n".join(f"{names[j] if names else j} {pred_probs.data[j]:.2f}" for j in pred_probs.top5)
-            x = round(self.orig_shape[0] * 0.03)
-            annotator.text([x, x], text, txt_color=(255, 255, 255))  # TODO: allow setting colors
-
-        # Plot Pose results
-        if self.keypoints is not None:
-            for k in reversed(self.keypoints.data):
-                annotator.kpts(k, self.orig_shape, radius=kpt_radius, kpt_line=kpt_line)
 
         # Show results
         if show:
@@ -317,12 +283,9 @@ class Results(SimpleClass):
     def verbose(self):
         """Return log string for each task."""
         log_string = ""
-        probs = self.probs
         boxes = self.boxes
         if len(self) == 0:
-            return log_string if probs is not None else f"{log_string}(no detections), "
-        if probs is not None:
-            log_string += f"{', '.join(f'{self.names[j]} {probs.data[j]:.2f}' for j in probs.top5)}, "
+            return log_string
         if boxes:
             for c in boxes.cls.unique():
                 n = (boxes.cls == c).sum()  # detections per class
@@ -402,12 +365,11 @@ class Results(SimpleClass):
             )
             return results
 
-        is_obb = self.obb is not None
-        data = self.obb if is_obb else self.boxes
+        data = self.boxes
         h, w = self.orig_shape if normalize else (1, 1)
         for i, row in enumerate(data):  # xyxy, track_id if tracking, conf, class_id
             class_id, conf = int(row.cls), round(row.conf.item(), decimals)
-            box = (row.xyxyxyxy if is_obb else row.xyxy).squeeze().reshape(-1, 2).tolist()
+            box = (row.xyxy).squeeze().reshape(-1, 2).tolist()
             xy = {}
             for j, b in enumerate(box):
                 xy[f"x{j + 1}"] = round(b[0] / w, decimals)
@@ -567,185 +529,3 @@ class Masks(BaseTensor):
             for x in ops.masks2segments(self.data)
         ]
 
-
-class Keypoints(BaseTensor):
-    """
-    A class for storing and manipulating detection keypoints.
-
-    Attributes:
-        xy (torch.Tensor): A collection of keypoints containing x, y coordinates for each detection.
-        xyn (torch.Tensor): A normalized version of xy with coordinates in the range [0, 1].
-        conf (torch.Tensor): Confidence values associated with keypoints if available, otherwise None.
-
-    Methods:
-        cpu(): Returns a copy of the keypoints tensor on CPU memory.
-        numpy(): Returns a copy of the keypoints tensor as a numpy array.
-        cuda(): Returns a copy of the keypoints tensor on GPU memory.
-        to(device, dtype): Returns a copy of the keypoints tensor with the specified device and dtype.
-    """
-
-    @smart_inference_mode()  # avoid keypoints < conf in-place error
-    def __init__(self, keypoints, orig_shape) -> None:
-        """Initializes the Keypoints object with detection keypoints and original image size."""
-        if keypoints.ndim == 2:
-            keypoints = keypoints[None, :]
-        if keypoints.shape[2] == 3:  # x, y, conf
-            mask = keypoints[..., 2] < 0.5  # points with conf < 0.5 (not visible)
-            keypoints[..., :2][mask] = 0
-        super().__init__(keypoints, orig_shape)
-        self.has_visible = self.data.shape[-1] == 3
-
-    @property
-    @lru_cache(maxsize=1)
-    def xy(self):
-        """Returns x, y coordinates of keypoints."""
-        return self.data[..., :2]
-
-    @property
-    @lru_cache(maxsize=1)
-    def xyn(self):
-        """Returns normalized x, y coordinates of keypoints."""
-        xy = self.xy.clone() if isinstance(self.xy, torch.Tensor) else np.copy(self.xy)
-        xy[..., 0] /= self.orig_shape[1]
-        xy[..., 1] /= self.orig_shape[0]
-        return xy
-
-    @property
-    @lru_cache(maxsize=1)
-    def conf(self):
-        """Returns confidence values of keypoints if available, else None."""
-        return self.data[..., 2] if self.has_visible else None
-
-
-class Probs(BaseTensor):
-    """
-    A class for storing and manipulating classification predictions.
-
-    Attributes:
-        top1 (int): Index of the top 1 class.
-        top5 (list[int]): Indices of the top 5 classes.
-        top1conf (torch.Tensor): Confidence of the top 1 class.
-        top5conf (torch.Tensor): Confidences of the top 5 classes.
-
-    Methods:
-        cpu(): Returns a copy of the probs tensor on CPU memory.
-        numpy(): Returns a copy of the probs tensor as a numpy array.
-        cuda(): Returns a copy of the probs tensor on GPU memory.
-        to(): Returns a copy of the probs tensor with the specified device and dtype.
-    """
-
-    def __init__(self, probs, orig_shape=None) -> None:
-        """Initialize the Probs class with classification probabilities and optional original shape of the image."""
-        super().__init__(probs, orig_shape)
-
-    @property
-    @lru_cache(maxsize=1)
-    def top1(self):
-        """Return the index of top 1."""
-        return int(self.data.argmax())
-
-    @property
-    @lru_cache(maxsize=1)
-    def top5(self):
-        """Return the indices of top 5."""
-        return (-self.data).argsort(0)[:5].tolist()  # this way works with both torch and numpy.
-
-    @property
-    @lru_cache(maxsize=1)
-    def top1conf(self):
-        """Return the confidence of top 1."""
-        return self.data[self.top1]
-
-    @property
-    @lru_cache(maxsize=1)
-    def top5conf(self):
-        """Return the confidences of top 5."""
-        return self.data[self.top5]
-
-
-class OBB(BaseTensor):
-    """
-    A class for storing and manipulating Oriented Bounding Boxes (OBB).
-
-    Args:
-        boxes (torch.Tensor | numpy.ndarray): A tensor or numpy array containing the detection boxes,
-            with shape (num_boxes, 7) or (num_boxes, 8). The last two columns contain confidence and class values.
-            If present, the third last column contains track IDs, and the fifth column from the left contains rotation.
-        orig_shape (tuple): Original image size, in the format (height, width).
-
-    Attributes:
-        xywhr (torch.Tensor | numpy.ndarray): The boxes in [x_center, y_center, width, height, rotation] format.
-        conf (torch.Tensor | numpy.ndarray): The confidence values of the boxes.
-        cls (torch.Tensor | numpy.ndarray): The class values of the boxes.
-        id (torch.Tensor | numpy.ndarray): The track IDs of the boxes (if available).
-        xyxyxyxyn (torch.Tensor | numpy.ndarray): The rotated boxes in xyxyxyxy format normalized by orig image size.
-        xyxyxyxy (torch.Tensor | numpy.ndarray): The rotated boxes in xyxyxyxy format.
-        xyxy (torch.Tensor | numpy.ndarray): The horizontal boxes in xyxyxyxy format.
-        data (torch.Tensor): The raw OBB tensor (alias for `boxes`).
-
-    Methods:
-        cpu(): Move the object to CPU memory.
-        numpy(): Convert the object to a numpy array.
-        cuda(): Move the object to CUDA memory.
-        to(*args, **kwargs): Move the object to the specified device.
-    """
-
-    def __init__(self, boxes, orig_shape) -> None:
-        """Initialize the Boxes class."""
-        if boxes.ndim == 1:
-            boxes = boxes[None, :]
-        n = boxes.shape[-1]
-        assert n in {7, 8}, f"expected 7 or 8 values but got {n}"  # xywh, rotation, track_id, conf, cls
-        super().__init__(boxes, orig_shape)
-        self.is_track = n == 8
-        self.orig_shape = orig_shape
-
-    @property
-    def xywhr(self):
-        """Return the rotated boxes in xywhr format."""
-        return self.data[:, :5]
-
-    @property
-    def conf(self):
-        """Return the confidence values of the boxes."""
-        return self.data[:, -2]
-
-    @property
-    def cls(self):
-        """Return the class values of the boxes."""
-        return self.data[:, -1]
-
-    @property
-    def id(self):
-        """Return the track IDs of the boxes (if available)."""
-        return self.data[:, -3] if self.is_track else None
-
-    @property
-    @lru_cache(maxsize=2)
-    def xyxyxyxy(self):
-        """Return the boxes in xyxyxyxy format, (N, 4, 2)."""
-        return ops.xywhr2xyxyxyxy(self.xywhr)
-
-    @property
-    @lru_cache(maxsize=2)
-    def xyxyxyxyn(self):
-        """Return the boxes in xyxyxyxy format, (N, 4, 2)."""
-        xyxyxyxyn = self.xyxyxyxy.clone() if isinstance(self.xyxyxyxy, torch.Tensor) else np.copy(self.xyxyxyxy)
-        xyxyxyxyn[..., 0] /= self.orig_shape[1]
-        xyxyxyxyn[..., 1] /= self.orig_shape[0]
-        return xyxyxyxyn
-
-    @property
-    @lru_cache(maxsize=2)
-    def xyxy(self):
-        """
-        Return the horizontal boxes in xyxy format, (N, 4).
-
-        Accepts both torch and numpy boxes.
-        """
-        x1 = self.xyxyxyxy[..., 0].min(1).values
-        x2 = self.xyxyxyxy[..., 0].max(1).values
-        y1 = self.xyxyxyxy[..., 1].min(1).values
-        y2 = self.xyxyxyxy[..., 1].max(1).values
-        xyxy = [x1, y1, x2, y2]
-        return np.stack(xyxy, axis=-1) if isinstance(self.data, np.ndarray) else torch.stack(xyxy, dim=-1)

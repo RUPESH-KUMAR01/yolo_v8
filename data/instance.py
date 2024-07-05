@@ -233,6 +233,7 @@ class Instances:
         if bbox_only:
             return
 
+
     def denormalize(self, w, h):
         """Denormalizes boxes, segments, and keypoints from normalized coordinates."""
         if not self.normalized:
@@ -251,7 +252,6 @@ class Instances:
         """Handle rect and mosaic situation."""
         assert not self.normalized, "you should add padding with absolute coordinates."
         self._bboxes.add(offset=(padw, padh, padw, padh))
-
     def __getitem__(self, index) -> "Instances":
         """
         Retrieve a specific instance or a set of instances using indexing.
@@ -295,7 +295,6 @@ class Instances:
             self.bboxes[:, 2] = w - x1
         else:
             self.bboxes[:, 0] = w - self.bboxes[:, 0]
-
     def clip(self, w, h):
         """Clips bounding boxes, segments, and keypoints values to stay within image boundaries."""
         ori_format = self._bboxes.format

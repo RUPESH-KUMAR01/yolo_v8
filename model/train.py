@@ -6,26 +6,24 @@ import os
 from pathlib import Path
 import random
 import time
-from typing import List, Union
+from types import SimpleNamespace
 import warnings
-import cv2
+from matplotlib import pyplot as plt
 from torch import optim
 import numpy as np
 import torch
 from torch import nn
-from cfg import ASSETS, DEFAULT_CFG, RANK, config
+from data import ASSETS, DEFAULT_CFG, RANK, yaml_save
 from data.augment import torch_distributed_zero_first
 from data.build import build_dataloader, build_yolo_dataset
 from data.dataset import check_det_dataset, check_file
 from model import get_latest_run, get_save_dir, init_seeds, print_args, strip_optimizer
 from model.model import DetectionModel, EarlyStopping, ModelEMA
-from model.predict import DetectionPredictor
 from model.utils import attempt_load_one_weight, check_imgsz, convert_optimizer_state_dict_to_fp16
 from model.validator import DetectionValidator
-from utils import LOGGER, TQDM, callbacks
+from utils import LOGGER, callbacks
+from tqdm import tqdm as TQDM
 from utils.plotting import plot_images, plot_labels, plot_results
-from utils.results import Results
-from utils.yaml_util import yaml_save
 import torch.distributed as dist
 
 
@@ -40,7 +38,7 @@ class DetectionTrainer:
             cfg (str, optional): Path to a configuration file. Defaults to DEFAULT_CFG.
             overrides (dict, optional): Configuration overrides. Defaults to None.
         """
-        self.args = config.get_cfg(cfg, overrides)
+        self.args = SimpleNamespace(**cfg)
         overrides={}
         self.check_resume(overrides)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -129,7 +127,7 @@ class DetectionTrainer:
                     ckpt_args["data"] = self.args.data
 
                 resume = True
-                self.args = config.get_cfg(ckpt_args)
+                # self.args = SimpleNameSpace(**ckpt_args)
                 self.args.model = self.args.resume = str(last)  # reinstate model
                 for k in "imgsz", "batch", "device":  # allow arg updates to reduce memory or update device on resume
                     if k in overrides:
@@ -529,7 +527,9 @@ class DetectionTrainer:
         LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks with YOLOv8n...")
         warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
         try:
+            model=deepcopy(self.model)
             assert amp_allclose(model, im)
+            del model
             LOGGER.info(f"{prefix}checks passed ✅")
         except ConnectionError:
             LOGGER.warning(f"{prefix}checks skipped ⚠️, offline and unable to download YOLOv8n. {warning_msg}")

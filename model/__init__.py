@@ -7,9 +7,9 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-import urllib3
 
-from cfg import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, RANK, ROOT, RUNS_DIR
+from data import DEFAULT_CFG_DICT, RANK, ROOT, RUNS_DIR
+from data import DEFAULT_CFG_KEYS
 from data.augment import TORCH_2_0
 from utils import LOGGER
 
@@ -31,18 +31,8 @@ def get_save_dir(args, name=None):
 
 
 
-def clean_url(url):
-    """Strip auth from URL, i.e. https://url.com/file.txt?auth -> https://url.com/file.txt."""
-    url = Path(url).as_posix().replace(":/", "://")  # Pathlib turns :// -> :/, as_posix() for Windows
-    return urllib3.parse.unquote(url).split("?")[0]  # '%2F' to '/', split https://url.com/file.txt?auth
-
 def print_args(args: Optional[dict] = None, show_file=True, show_func=False):
     """Print function arguments (optional args dict)."""
-
-    def strip_auth(v):
-        """Clean longer Ultralytics HUB URLs by stripping potential authentication information."""
-        return clean_url(v) if (isinstance(v, str) and v.startswith("http") and len(v) > 100) else v
-
     x = inspect.currentframe().f_back  # previous frame
     file, _, func, _, _ = inspect.getframeinfo(x)
     if args is None:  # get args automatically
@@ -53,7 +43,7 @@ def print_args(args: Optional[dict] = None, show_file=True, show_func=False):
     except ValueError:
         file = Path(file).stem
     s = (f"{file}: " if show_file else "") + (f"{func}: " if show_func else "")
-    LOGGER.info((s) + ", ".join(f"{k}={strip_auth(v)}" for k, v in args.items()))
+    LOGGER.info((s) + ", ".join(f"{k}={v}" for k, v in args.items()))
 
 def init_seeds(seed=0, deterministic=False):
     """Initialize random number generator (RNG) seeds https://pytorch.org/docs/stable/notes/randomness.html."""

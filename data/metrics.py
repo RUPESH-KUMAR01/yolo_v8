@@ -10,8 +10,7 @@ import numpy as np
 import torch
 
 from utils import LOGGER, SimpleClass
-
-
+from utils.tryexcept import TryExcept
 def plt_settings(rcparams=None, backend="Agg"):
     """
     Decorator to temporarily set rc parameters and the backend for a plotting function.
@@ -53,7 +52,6 @@ def plt_settings(rcparams=None, backend="Agg"):
         return wrapper
 
     return decorator
-
 OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0
@@ -426,6 +424,7 @@ class ConfusionMatrix:
         # fn = self.matrix.sum(0) - tp  # false negatives (missed detections)
         return (tp[:-1], fp[:-1]) if self.task == "detect" else (tp, fp)  # remove background class if task=detect
 
+    @TryExcept("WARNING ⚠️ ConfusionMatrix plot failure")
     @plt_settings()
     def plot(self, normalize=True, save_dir="", names=(), on_plot=None):
         """
@@ -437,42 +436,39 @@ class ConfusionMatrix:
             names (tuple): Names of classes, used as labels on the plot.
             on_plot (func): An optional callback to pass plots path and data when they are rendered.
         """
-        try:
-            import seaborn  # scope for faster 'import ultralytics'
+        import seaborn  # scope for faster 'import ultralytics'
 
-            array = self.matrix / ((self.matrix.sum(0).reshape(1, -1) + 1e-9) if normalize else 1)  # normalize columns
-            array[array < 0.005] = np.nan  # don't annotate (would appear as 0.00)
+        array = self.matrix / ((self.matrix.sum(0).reshape(1, -1) + 1e-9) if normalize else 1)  # normalize columns
+        array[array < 0.005] = np.nan  # don't annotate (would appear as 0.00)
 
-            fig, ax = plt.subplots(1, 1, figsize=(12, 9), tight_layout=True)
-            nc, nn = self.nc, len(names)  # number of classes, names
-            seaborn.set_theme(font_scale=1.0 if nc < 50 else 0.8)  # for label size
-            labels = (0 < nn < 99) and (nn == nc)  # apply names to ticklabels
-            ticklabels = (list(names) + ["background"]) if labels else "auto"
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")  # suppress empty matrix RuntimeWarning: All-NaN slice encountered
-                seaborn.heatmap(
-                    array,
-                    ax=ax,
-                    annot=nc < 30,
-                    annot_kws={"size": 8},
-                    cmap="Blues",
-                    fmt=".2f" if normalize else ".0f",
-                    square=True,
-                    vmin=0.0,
-                    xticklabels=ticklabels,
-                    yticklabels=ticklabels,
-                ).set_facecolor((1, 1, 1))
-            title = "Confusion Matrix" + " Normalized" * normalize
-            ax.set_xlabel("True")
-            ax.set_ylabel("Predicted")
-            ax.set_title(title)
-            plot_fname = Path(save_dir) / f'{title.lower().replace(" ", "_")}.png'
-            fig.savefig(plot_fname, dpi=250)
-            plt.close(fig)
-            if on_plot:
-                on_plot(plot_fname)
-        except:
-            LOGGER.warning("WARNING ⚠️ ConfusionMatrix plot failure")
+        fig, ax = plt.subplots(1, 1, figsize=(12, 9), tight_layout=True)
+        nc, nn = self.nc, len(names)  # number of classes, names
+        seaborn.set_theme(font_scale=1.0 if nc < 50 else 0.8)  # for label size
+        labels = (0 < nn < 99) and (nn == nc)  # apply names to ticklabels
+        ticklabels = (list(names) + ["background"]) if labels else "auto"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # suppress empty matrix RuntimeWarning: All-NaN slice encountered
+            seaborn.heatmap(
+                array,
+                ax=ax,
+                annot=nc < 30,
+                annot_kws={"size": 8},
+                cmap="Blues",
+                fmt=".2f" if normalize else ".0f",
+                square=True,
+                vmin=0.0,
+                xticklabels=ticklabels,
+                yticklabels=ticklabels,
+            ).set_facecolor((1, 1, 1))
+        title = "Confusion Matrix" + " Normalized" * normalize
+        ax.set_xlabel("True")
+        ax.set_ylabel("Predicted")
+        ax.set_title(title)
+        plot_fname = Path(save_dir) / f'{title.lower().replace(" ", "_")}.png'
+        fig.savefig(plot_fname, dpi=250)
+        plt.close(fig)
+        if on_plot:
+            on_plot(plot_fname)
 
     def print(self):
         """Print the confusion matrix to the console."""

@@ -10,43 +10,7 @@ import torch
 import torch.nn.functional as F
 from data.ops import make_divisible
 from torch import nn
-import traceback
-from model.modules import (
-    C1,
-    C2,
-    C3,
-    SPP,
-    SPPELAN,
-    SPPF,
-    ADown,
-    Bottleneck,
-    BottleneckCSP,
-    C2f,
-    C2fAttn,
-    C3Ghost,
-    C3x,
-    CBFuse,
-    CBLinear,
-    Concat,
-    Conv,
-    Conv2,
-    ConvTranspose,
-    Detect,
-    DWConv,
-    DWConvTranspose2d,
-    Focus,
-    GhostBottleneck,
-    GhostConv,
-    HGBlock,
-    HGStem,
-    ImagePoolingAttn,
-    RepC3,
-    RepConv,
-    RepNCSPELAN4,
-    ResNetLayer,
-)
-from model.modules.head import Detect
-from model.loss import v8DetectionLoss
+from model.loss import dist2bbox, make_anchors, v8DetectionLoss
 from model.utils import yaml_model_load
 from utils import LOGGER
 class DetectionModel(nn.Module):
@@ -109,8 +73,8 @@ class DetectionModel(nn.Module):
         Returns:
             (torch.Tensor): The last output of the model.
         """
-        if augment:
-            return self._predict_augment(x)
+        # if augment:
+        #     return self._predict_augment(x)
         return self._predict_once(x, profile, visualize, embed)
 
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
@@ -130,50 +94,9 @@ class DetectionModel(nn.Module):
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-            if profile:
-                self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
-            if visualize:
-                feature_visualization(x, m.type, m.i, save_dir=visualize)
-            if embed and m.i in embed:
-                embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                if m.i == max(embed):
-                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
         return x
-
-    def _predict_augment(self, x):
-        """Perform augmentations on input image x and return augmented inference."""
-        LOGGER.warning(
-            f"WARNING ⚠️ {self.__class__.__name__} does not support augmented inference yet. "
-            f"Reverting to single-scale inference instead."
-        )
-        return self._predict_once(x)
-
-    def _profile_one_layer(self, m, x, dt):
-        """
-        Profile the computation time and FLOPs of a single layer of the model on a given input. Appends the results to
-        the provided list.
-
-        Args:
-            m (nn.Module): The layer to be profiled.
-            x (torch.Tensor): The input data to the layer.
-            dt (list): A list to store the computation time of the layer.
-
-        Returns:
-            None
-        """
-        c = m == self.model[-1] and isinstance(x, list)  # is final layer list, copy input as inplace fix
-        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1e9 * 2 if thop else 0  # GFLOPs
-        t = time_sync()
-        for _ in range(10):
-            m(x.copy() if c else x)
-        dt.append((time_sync() - t) * 100)
-        if m == self.model[0]:
-            LOGGER.info(f"{'time (ms)':>10s} {'GFLOPs':>10s} {'params':>10s}  module")
-        LOGGER.info(f"{dt[-1]:10.2f} {flops:10.2f} {m.np:10.0f}  {m.type}")
-        if c:
-            LOGGER.info(f"{sum(dt):10.2f} {'-':>10s} {'-':>10s}  Total")
 
     def fuse(self, verbose=True):
         """
@@ -185,18 +108,9 @@ class DetectionModel(nn.Module):
         """
         if not self.is_fused():
             for m in self.model.modules():
-                if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, "bn"):
-                    if isinstance(m, Conv2):
-                        m.fuse_convs()
+                if isinstance(m, (Conv)) and hasattr(m, "bn"):
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                     delattr(m, "bn")  # remove batchnorm
-                    m.forward = m.forward_fuse  # update forward
-                if isinstance(m, ConvTranspose) and hasattr(m, "bn"):
-                    m.conv_transpose = fuse_deconv_and_bn(m.conv_transpose, m.bn)
-                    delattr(m, "bn")  # remove batchnorm
-                    m.forward = m.forward_fuse  # update forward
-                if isinstance(m, RepConv):
-                    m.fuse_convs()
                     m.forward = m.forward_fuse  # update forward
             self.info(verbose=verbose)
 
@@ -272,20 +186,6 @@ class DetectionModel(nn.Module):
 
         preds = self.forward(batch["img"]) if preds is None else preds
         return self.criterion(preds, batch)
-
-    def _predict_augment(self, x):
-        """Perform augmentations on input image x and return augmented inference and train outputs."""
-        img_size = x.shape[-2:]  # height, width
-        s = [1, 0.83, 0.67]  # scales
-        f = [None, 3, None]  # flips (2-ud, 3-lr)
-        y = []  # outputs
-        for si, fi in zip(s, f):
-            xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-            yi = super().predict(xi)[0]  # forward
-            yi = self._descale_pred(yi, fi, si, img_size)
-            y.append(yi)
-        y = self._clip_augmented(y)  # clip augmented tails
-        return torch.cat(y, -1), None  # augmented inference, train
 
     @staticmethod
     def _descale_pred(p, flips, scale, img_size, dim=1):
@@ -495,39 +395,6 @@ def intersect_dicts(da, db, exclude=()):
     """Returns a dictionary of intersecting keys with matching shapes, excluding 'exclude' keys, using da values."""
     return {k: v for k, v in da.items() if k in db and all(x not in k for x in exclude) and v.shape == db[k].shape}
 
-def feature_visualization(x, module_type, stage, n=32, save_dir=Path("runs/detect/exp")):
-    """
-    Visualize feature maps of a given model module during inference.
-
-    Args:
-        x (torch.Tensor): Features to be visualized.
-        module_type (str): Module type.
-        stage (int): Module stage within the model.
-        n (int, optional): Maximum number of feature maps to plot. Defaults to 32.
-        save_dir (Path, optional): Directory to save results. Defaults to Path('runs/detect/exp').
-    """
-    for m in {"Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"}:  # all model heads
-        if m in module_type:
-            return
-    if isinstance(x, torch.Tensor):
-        _, channels, height, width = x.shape  # batch, channels, height, width
-        if height > 1 and width > 1:
-            f = save_dir / f"stage{stage}_{module_type.split('.')[-1]}_features.png"  # filename
-
-            blocks = torch.chunk(x[0].cpu(), channels, dim=0)  # select batch index 0, block by channels
-            n = min(n, channels)  # number of plots
-            _, ax = plt.subplots(math.ceil(n / 8), 8, tight_layout=True)  # 8 rows x n/8 cols
-            ax = ax.ravel()
-            plt.subplots_adjust(wspace=0.05, hspace=0.05)
-            for i in range(n):
-                ax[i].imshow(blocks[i].squeeze())  # cmap='gray'
-                ax[i].axis("off")
-
-            LOGGER.info(f"Saving {f}... ({n}/{channels})")
-            plt.savefig(f, dpi=300, bbox_inches="tight")
-            plt.close()
-            np.save(str(f.with_suffix(".npy")), x[0].cpu().numpy())  # npy save
-
 def fuse_conv_and_bn(conv, bn):
     """Fuse Conv2d() and BatchNorm2d() layers https://tehnokv.com/posts/fusing-batchnorm-and-conv/."""
     fusedconv = (
@@ -558,65 +425,13 @@ def fuse_conv_and_bn(conv, bn):
     return fusedconv
 
 
-def fuse_deconv_and_bn(deconv, bn):
-    """Fuse ConvTranspose2d() and BatchNorm2d() layers."""
-    fuseddconv = (
-        nn.ConvTranspose2d(
-            deconv.in_channels,
-            deconv.out_channels,
-            kernel_size=deconv.kernel_size,
-            stride=deconv.stride,
-            padding=deconv.padding,
-            output_padding=deconv.output_padding,
-            dilation=deconv.dilation,
-            groups=deconv.groups,
-            bias=True,
-        )
-        .requires_grad_(False)
-        .to(deconv.weight.device)
-    )
-
-    # Prepare filters
-    w_deconv = deconv.weight.clone().view(deconv.out_channels, -1)
-    w_bn = torch.diag(bn.weight.div(torch.sqrt(bn.eps + bn.running_var)))
-    fuseddconv.weight.copy_(torch.mm(w_bn, w_deconv).view(fuseddconv.weight.shape))
-
-    # Prepare spatial bias
-    b_conv = torch.zeros(deconv.weight.shape[1], device=deconv.weight.device) if deconv.bias is None else deconv.bias
-    b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
-    fuseddconv.bias.copy_(torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn)
-
-    return fuseddconv
-
-
-
-
-def pad(k, p=None, d=1):
+def autopad(k, p=None, d=1):  # kernel, padding, dilation
+    """Pad to 'same' shape outputs."""
     if d > 1:
-        k = d * (k - 1) + 1
+        k = d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]  # actual kernel-size
     if p is None:
-        p = k // 2
+        p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
-
-
-def fuse_conv(conv, norm):
-    fused_conv = torch.nn.Conv2d(conv.in_channels,
-                                 conv.out_channels,
-                                 kernel_size=conv.kernel_size,
-                                 stride=conv.stride,
-                                 padding=conv.padding,
-                                 groups=conv.groups,
-                                 bias=True).requires_grad_(False).to(conv.weight.device)
-
-    w_conv = conv.weight.clone().view(conv.out_channels, -1)
-    w_norm = torch.diag(norm.weight.div(torch.sqrt(norm.eps + norm.running_var)))
-    fused_conv.weight.copy_(torch.mm(w_norm, w_conv).view(fused_conv.weight.size()))
-
-    b_conv = torch.zeros(conv.weight.size(0), device=conv.weight.device) if conv.bias is None else conv.bias
-    b_norm = norm.bias - norm.weight.mul(norm.running_mean).div(torch.sqrt(norm.running_var + norm.eps))
-    fused_conv.bias.copy_(torch.mm(w_norm, b_conv.reshape(-1, 1)).reshape(-1) + b_norm)
-
-    return fused_conv
 
 
 
@@ -654,66 +469,24 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in {
             Conv,
-            ConvTranspose,
-            GhostConv,
             Bottleneck,
-            GhostBottleneck,
-            SPP,
             SPPF,
-            DWConv,
-            Focus,
-            BottleneckCSP,
-            C1,
-            C2,
             C2f,
-            RepNCSPELAN4,
-            ADown,
-            SPPELAN,
-            C2fAttn,
-            C3,
-            C3Ghost,
             nn.ConvTranspose2d,
-            DWConvTranspose2d,
-            C3x,
-            RepC3,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
-            if m is C2fAttn:
-                args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)  # embed channels
-                args[2] = int(
-                    max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2]
-                )  # num heads
-
             args = [c1, c2, *args[1:]]
-            if m in {BottleneckCSP, C1, C2, C2f, C2fAttn, C3,C3Ghost, C3x, RepC3}:
+            if m in {C2f}:
                 args.insert(2, n)  # number of repeats
                 n = 1
-        elif m in {HGStem, HGBlock}:
-            c1, cm, c2 = ch[f], args[0], args[1]
-            args = [c1, cm, c2, *args[2:]]
-            if m is HGBlock:
-                args.insert(4, n)  # number of repeats
-                n = 1
-        elif m is ResNetLayer:
-            c2 = args[1] if args[3] else args[1] * 4
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect,ImagePoolingAttn}:
+        elif m in {Detect}:
             args.append([ch[x] for x in f])
-            # if m is Segment:
-            #     args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-        # elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
-        #     args.insert(1, [ch[x] for x in f])
-        elif m is CBLinear:
-            c2 = args[0]
-            c1 = ch[f]
-            args = [c1, c2, *args[1:]]
-        elif m is CBFuse:
-            c2 = ch[f[-1]]
         else:
             c2 = ch[f]
 
@@ -729,3 +502,187 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
+
+
+
+class Detect(nn.Module):
+    """YOLOv8 Detect head for detection models."""
+
+    dynamic = False  # force grid reconstruction
+    export = False  # export mode
+    shape = None
+    anchors = torch.empty(0)  # init
+    strides = torch.empty(0)  # init
+
+    def __init__(self, nc=80, ch=()):
+        """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
+        super().__init__()
+        self.nc = nc  # number of classes
+        self.nl = len(ch)  # number of detection layers
+        self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.no = nc + self.reg_max * 4  # number of outputs per anchor
+        self.stride = torch.zeros(self.nl)  # strides computed during build
+        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        self.cv2 = nn.ModuleList(
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+        )
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+
+    def forward(self, x):
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+        if self.training:  # Training path
+            return x
+        # Inference path
+        shape = x[0].shape  # BCHW
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
+        else:
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+
+        if self.export and self.format in {"tflite", "edgetpu"}:
+            # Precompute normalization factor to increase numerical stability
+            # See https://github.com/ultralytics/ultralytics/issues/7371
+            grid_h = shape[2]
+            grid_w = shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+
+        y = torch.cat((dbox, cls.sigmoid()), 1)
+        return y if self.export else (y, x)
+
+    def bias_init(self):
+        """Initialize Detect() biases, WARNING: requires stride availability."""
+        m = self  # self.model[-1]  # Detect() module
+        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
+        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
+            a[-1].bias.data[:] = 1.0  # box
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
+    def decode_bboxes(self, bboxes, anchors):
+        """Decode bounding boxes."""
+        return dist2bbox(bboxes, anchors, xywh=True, dim=1)
+    
+
+class DFL(nn.Module):
+    """
+    Integral module of Distribution Focal Loss (DFL).
+
+    Proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
+    """
+
+    def __init__(self, c1=16):
+        """Initialize a convolutional layer with a given number of input channels."""
+        super().__init__()
+        self.conv = nn.Conv2d(c1, 1, 1, bias=False).requires_grad_(False)
+        x = torch.arange(c1, dtype=torch.float)
+        self.conv.weight.data[:] = nn.Parameter(x.view(1, c1, 1, 1))
+        self.c1 = c1
+
+    def forward(self, x):
+        """Applies a transformer layer on input tensor 'x' and returns a tensor."""
+        b, _, a = x.shape  # batch, channels, anchors
+        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
+        # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
+class Conv(nn.Module):
+    """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize Conv layer with given arguments including activation."""
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x):
+        """Apply convolution, batch normalization and activation to input tensor."""
+        return self.act(self.bn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        """Perform transposed convolution of 2D data."""
+        return self.act(self.conv(x))
+class SPPF(nn.Module):
+    """Spatial Pyramid Pooling - Fast (SPPF) layer for YOLOv5 by Glenn Jocher."""
+
+    def __init__(self, c1, c2, k=5):
+        """
+        Initializes the SPPF layer with given input/output channels and kernel size.
+
+        This module is equivalent to SPP(k=(5, 9, 13)).
+        """
+        super().__init__()
+        c_ = c1 // 2  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_ * 4, c2, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+
+    def forward(self, x):
+        """Forward pass through Ghost Convolution block."""
+        y = [self.cv1(x)]
+        y.extend(self.m(y[-1]) for _ in range(3))
+        return self.cv2(torch.cat(y, 1))
+class C2f(nn.Module):
+    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
+        expansion.
+        """
+        super().__init__()
+        self.c = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+
+    def forward(self, x):
+        """Forward pass through C2f layer."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x):
+        """Forward pass using split() instead of chunk()."""
+        y = list(self.cv1(x).split((self.c, self.c), 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+class Bottleneck(nn.Module):
+    """Standard bottleneck."""
+
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        """Initializes a bottleneck module with given input/output channels, shortcut option, group, kernels, and
+        expansion.
+        """
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """'forward()' applies the YOLO FPN to input data."""
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+class Concat(nn.Module):
+    """Concatenate a list of tensors along dimension."""
+
+    def __init__(self, dimension=1):
+        """Concatenates a list of tensors along a specified dimension."""
+        super().__init__()
+        self.d = dimension
+
+    def forward(self, x):
+        """Forward pass for the YOLOv8 mask Proto module."""
+        return torch.cat(x, self.d)

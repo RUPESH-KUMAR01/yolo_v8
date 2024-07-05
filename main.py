@@ -1,31 +1,32 @@
-import argparse
 import cv2
-from cfg import DEFAULT_CFG_DICT, ROOT
 from main_parser import parse_args
 from model.predict import DetectionPredictor
 from model.train import DetectionTrainer
 from model.validator import DetectionValidator
-from utils import LOGGER
 
 
 def train(overrides):
-    trainer=DetectionTrainer(overrides=overrides)
+    trainer=DetectionTrainer(cfg=overrides)
     trainer.train()
 def val(overrides):
     validator=DetectionValidator(args=overrides)
     validator()
-def predict_source(overrides,model=r"runs\coco\weights\best.pt",source=r"assets\bus.jpg"):
-    predictor=DetectionPredictor(overrides=overrides)
-    predictor.setup_model(model=model, verbose=False)
-    results=predictor(source=source,stream=True)
+def predict_source(overrides,model=r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train3\weights\best.pt",source=r"assets\bus.jpg"):
+    model=model if "model" not in overrides else overrides["model"]
+    source=source if "source" not in overrides else overrides["source"]
+    predictor=DetectionPredictor(cfg=overrides)
+    predictor.setup_model(model=model, verbose=True)
+    results=predictor(source=source,stream=False)
     for i in results:
         pass
 
-def webcam(model=r'runs\coco\weights\best.pt',source=0):
+def webcam(overrides,source=0):
     # Open the video file
     cap = cv2.VideoCapture(source)
-    predictor=DetectionPredictor(overrides={"mode":"predict","save":False})
-    predictor.setup_model(model=model, verbose=True)
+    overrides["mode"]="predict"
+    overrides["save"]=False
+    predictor=DetectionPredictor(cfg=overrides)
+    predictor.setup_model(model=overrides["model"], verbose=True)
     # Loop through the video frames
     while cap.isOpened():
         # Read a frame from the video
@@ -53,24 +54,19 @@ def webcam(model=r'runs\coco\weights\best.pt',source=0):
 def main(overrides):
     if overrides["mode"]=="val":
         overrides.pop("webcam")
-        if ("model" in overrides )& (overrides["model"].endswith(".pt")):
-            LOGGER.info(f"Using default dataset for validation {DEFAULT_CFG_DICT['data']}")
-            val(overrides)
+        val(overrides)
     elif overrides["mode"]=="predict":
         if overrides["webcam"]:
-            webcam(overrides["model"] if "model" in overrides else None ,overrides["source"] if "source" in overrides else 0)
+            overrides.pop("webcam")
+            webcam(overrides)
         else:
             overrides.pop("webcam")
-            predict_source(overrides=overrides,model=overrides["model"] if "model" in overrides else None,source=overrides["source"] if "source" in overrides else None)
+            predict_source(overrides=overrides)
     else:
         overrides.pop("webcam")
         train(overrides)
 
 if __name__ == "__main__":
     overrides = parse_args()
-    if "model" in overrides:
-        if overrides["model"].endswith(".yaml"):
-            overrides["mode"]="train"
-    if "source" in overrides:
-        overrides["mode"]="predict"
+    overrides=vars(overrides)
     main(overrides)
