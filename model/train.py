@@ -13,6 +13,7 @@ from torch import optim
 import numpy as np
 import torch
 from torch import nn
+from custom import CustomDetection
 from data import ASSETS, DEFAULT_CFG, RANK, yaml_save
 from data.augment import torch_distributed_zero_first
 from data.build import build_dataloader, build_yolo_dataset
@@ -353,7 +354,8 @@ class DetectionTrainer:
         # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
-        model = DetectionModel(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        # model = DetectionModel(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        model=CustomDetection(nc=self.data["nc"])
         if weights:
             model.load(weights)
         return model

@@ -166,7 +166,7 @@ class DetectionValidator:
 
             # Inference
             with dt[1]:
-                preds = model(batch["img"], augment=augment)
+                preds = model(batch["img"])
 
             # Loss
             with dt[2]:

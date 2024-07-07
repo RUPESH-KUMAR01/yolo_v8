@@ -183,9 +183,10 @@ import matplotlib.patches as patches
 # model=ckpt["ema"] or ckpt["model"]
 # torch.save(model.state_dict(),"weights.pt")
 
-# ckpt=torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train17\weights\best.pt")
+ckpt=torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train2\weights\best.pt")
 
-# model=ckpt["ema"] or ckpt["model"]
+model=ckpt["ema"] or ckpt["model"]
+print(model)
 
 # model.load_state_dict(torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\weights.pt"))
 
@@ -197,4 +198,4 @@ import matplotlib.patches as patches
 
 # print(yaml_model_load(r"C:\Users\thata\intern\code\pre-built-models\modified\data\yolov8.yaml"))
 
-print(get_latest_run())
+# print(get_latest_run())
