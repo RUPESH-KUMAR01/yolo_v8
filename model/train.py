@@ -8,18 +8,17 @@ import random
 import time
 from types import SimpleNamespace
 import warnings
-from matplotlib import pyplot as plt
 from torch import optim
 import numpy as np
 import torch
 from torch import nn
-from custom import CustomDetection
+from model.custom import CustomDetection
 from data import ASSETS, DEFAULT_CFG, RANK, yaml_save
 from data.augment import torch_distributed_zero_first
 from data.build import build_dataloader, build_yolo_dataset
 from data.dataset import check_det_dataset, check_file
 from model import get_latest_run, get_save_dir, init_seeds, print_args, strip_optimizer
-from model.model import DetectionModel, EarlyStopping, ModelEMA
+from model.model import EarlyStopping, ModelEMA
 from model.utils import attempt_load_one_weight, check_imgsz, convert_optimizer_state_dict_to_fp16
 from model.validator import DetectionValidator
 from utils import LOGGER, callbacks
@@ -41,6 +40,7 @@ class DetectionTrainer:
         """
         self.args = SimpleNamespace(**cfg)
         overrides={}
+        overrides["model"]=self.args.model
         self.check_resume(overrides)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.validator = None
@@ -119,8 +119,8 @@ class DetectionTrainer:
         resume = self.args.resume
         if resume:
             try:
-                exists = isinstance(resume, (str, Path)) and Path(resume).exists()
-                last = Path(check_file(resume) if exists else get_latest_run())
+                last =overrides["model"]
+                print(last)
                 # Check that resume data YAML exists, otherwise strip to force re-download of dataset
                 model,ckpt= attempt_load_one_weight(last)
                 ckpt_args =model.args
@@ -368,7 +368,6 @@ class DetectionTrainer:
         ckpt = None
         if str(self.model).endswith(".pt"):
             weights, ckpt = attempt_load_one_weight(self.model)
-            cfg = weights.yaml
         elif isinstance(self.args.pretrained, (str, Path)):
             weights, _ = attempt_load_one_weight(self.args.pretrained)
         self.model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)

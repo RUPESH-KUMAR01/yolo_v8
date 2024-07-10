@@ -3,7 +3,8 @@ from torch import nn
 import torch
 
 from model.loss import v8DetectionLoss
-from model.model import initialize_weights, model_info
+from model.model import initialize_weights, intersect_dicts, model_info
+from utils import LOGGER
 
 
 def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
@@ -289,6 +290,40 @@ class CustomDetection(nn.Module):
         if isinstance(x, dict):  # for cases of training and validating while training.
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
+    def _apply(self, fn):
+        """
+        Applies a function to all the tensors in the model that are not parameters or registered buffers.
+
+        Args:
+            fn (function): the function to apply to the model
+
+        Returns:
+            (BaseModel): An updated BaseModel object.
+        """
+        self = super()._apply(fn)
+        m = self.detect
+        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+            m.stride = fn(m.stride)
+            m.anchors = fn(m.anchors)
+            m.strides = fn(m.strides)
+        return self
+
+    def load(self, weights, verbose=True):
+        """
+        Load the weights into the model.
+
+        Args:
+            weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
+            verbose (bool, optional): Whether to log the transfer progress. Defaults to True.
+        """
+        model = weights["model"] if isinstance(weights, dict) else weights  # torchvision models are not dicts
+        csd = model.float().state_dict()  # checkpoint state_dict as FP32
+        csd = intersect_dicts(csd, self.state_dict())  # intersect
+        self.load_state_dict(csd, strict=False)  # load
+        if verbose:
+            LOGGER.info(f"Transferred {len(csd)}/{len(self.state_dict())} items from pretrained weights")
+
+
     def predict(self,x):
         return self.detect(self.FPN(self.Backbone(x)))
     

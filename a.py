@@ -1,3 +1,4 @@
+import glob
 import cv2
 from torch import nn
 import math
@@ -11,8 +12,7 @@ from model import get_latest_run
 from model.train import DetectionTrainer
 import time
 from PIL import Image
-
-from model.utils import yaml_model_load
+import torchvision
 # dataset=YOLODataset(
 #     img_path=check_det_dataset("VOC.yaml")["train"],
 #     data=DEFAULT_CFG_DICT
@@ -183,10 +183,10 @@ import matplotlib.patches as patches
 # model=ckpt["ema"] or ckpt["model"]
 # torch.save(model.state_dict(),"weights.pt")
 
-ckpt=torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train2\weights\best.pt")
+# ckpt=torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\runs\detect\train2\weights\best.pt")
 
-model=ckpt["ema"] or ckpt["model"]
-print(model)
+# model=ckpt["ema"] or ckpt["model"]
+# print(model)
 
 # model.load_state_dict(torch.load(r"C:\Users\thata\intern\code\pre-built-models\modified\weights.pt"))
 
